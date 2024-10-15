@@ -2,6 +2,11 @@ typedef RedisSubscriberCallback = void Function(
     String channel, String? message);
 
 class RedisSubscriber {
-  /// listen for new message on the subscriber
+  RedisSubscriber({required this.channel, this.onMessage});
+  final String channel;
   RedisSubscriberCallback? onMessage;
+
+  @override
+  String toString() =>
+      'RedisSubscriber(channel: $channel, onMessage: $onMessage)';
 }

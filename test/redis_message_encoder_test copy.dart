@@ -6,22 +6,22 @@ RedisMessageEncoder encoder = RedisMessageEncoder();
 void main() {
   group('protocol message encoder', () {
     test('string', () {
-      List<int> val = encoder.encode(<String>['GET', 'key']);
+      final val = encoder.encode(<String>['GET', 'key']);
       expect(true, val.isNotEmpty);
     });
 
     test('null', () {
-      List<int> val = encoder.encode(null);
+      final val = encoder.encode(null);
       expect(true, val.isNotEmpty);
     });
 
     test('array with strings', () {
-      List<int> val = encoder.encode(<String>['SET', 'key', 'value']);
+      final val = encoder.encode(<String>['SET', 'key', 'value']);
       expect(true, val.isNotEmpty);
     });
 
     test('array with int mixed', () {
-      List<int> val = encoder.encode(<dynamic>['SET', 'key', 1]);
+      final val = encoder.encode(<dynamic>['SET', 'key', 1]);
       expect(true, val.isNotEmpty);
     });
   });

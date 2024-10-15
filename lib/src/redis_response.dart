@@ -1,13 +1,14 @@
 enum RedisResponseConstant {
+  
   ok('OK'),
   simpleString('+'),
   error('-'),
-  bulkString('\$'),
+  bulkString(r'$'),
   integer(':'),
   array('*');
-
-  final String name;
   const RedisResponseConstant(this.name);
+  final String name;
+
 }
 
 enum RedisType {
@@ -15,8 +16,8 @@ enum RedisType {
   subscriber('publisher'),
   publisher('publisher');
 
-  final String name;
   const RedisType(this.name);
+  final String name;
 }
 
 class RedisResponse {
@@ -29,38 +30,38 @@ class RedisResponse {
   }
 
   static String? toSimpleString(String s) {
-    String? val = s.substring(1).replaceFirst('\r\n', '');
+    final val = s.substring(1).replaceFirst('\r\n', '');
     if (val.isEmpty) return null;
     return val;
   }
 
   static String? toBulkString(String s) {
-    List<String> listOfData = s.split('\r\n');
+    final listOfData = s.split('\r\n');
     if (listOfData[1].isEmpty) return null;
     return listOfData[1];
   }
 
   static List<String?> toArrayString(String s) {
-    List<String> listOfData = s.split('\r\n');
-    List<String?> elements = <String?>[];
+    final listOfData = s.split('\r\n');
+    final elements = <String?>[];
 
-    int count = int.parse(listOfData[0].substring(1));
-    int currentIndex = 0;
-    int i = 0;
+    final count = int.parse(listOfData[0].substring(1));
+    var currentIndex = 0;
+    var i = 0;
 
-    String type = '';
+    var type = '';
 
     while (currentIndex < count) {
       i++;
-      String element = '$type${listOfData[i]}';
+      final element = '$type${listOfData[i]}';
       if (type.isEmpty && (isBulkString(element))) {
         type = '$element\r\n';
       } else if (type.isNotEmpty) {
-        elements.add(transform(element));
+        elements.add(transform(element) as String?);
         type = '';
         currentIndex++;
       } else {
-        elements.add(transform(element));
+        elements.add(transform(element) as String?);
         currentIndex++;
       }
     }
@@ -88,7 +89,7 @@ class RedisResponse {
   }
 
   static dynamic transform(String? s) {
-    if (s == null) return null;
+    if (s == null || s.isEmpty) return null;
     if (ok(s)) {
       return 'OK';
     } else if (isSimpleString(s)) {

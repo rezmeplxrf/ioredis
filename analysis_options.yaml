@@ -1,47 +1,33 @@
-# This file configures the static analysis results for your project (errors,
-# warnings, and lints).
-#
-# This enables the 'recommended' set of lints from `package:lints`.
-# This set helps identify many issues that may lead to problems when running
-# or consuming Dart code, and enforces writing Dart using a single, idiomatic
-# style and format.
-#
-# If you want a smaller set of lints you can change this to specify
-# 'package:lints/core.yaml'. These are just the most critical lints
-# (the recommended set includes the core lints).
-# The core lints are also what is used by pub.dev for scoring packages.
-
+include: package:very_good_analysis/analysis_options.6.0.0.yaml
 analyzer:
+  exclude:
+    - build/**
+    - "**.freezed.dart"
+    - "**.g.dart"
+    # - test/**
   errors:
-    file_names: ignore
-include: package:lints/recommended.yaml
-
-# Uncomment the following section to specify additional rules.
+    avoid_dynamic_calls: ignore
+    avoid_returning_this: ignore
+    avoid_setters_without_getters: ignore
+    cascade_invocations: ignore
+    eol_at_end_of_file: ignore
+    inference_failure_on_function_invocation: ignore
+    invalid_annotation_target: ignore
+    missing_code_block_language_in_doc_comment: ignore
+    no_default_cases: ignore
+    one_member_abstracts: ignore
+    prefer_null_aware_method_calls: ignore
+    use_if_null_to_convert_nulls_to_bools: ignore
+    use_setters_to_change_properties: ignore
+    use_to_and_as_if_applicable: ignore
 
 linter:
   rules:
-    - camel_case_types
-    - avoid_empty_else
-    - always_specify_types
-    - always_declare_return_types
-    - leading_newlines_in_multiline_strings
-    - unnecessary_brace_in_string_interps
-    - avoid_redundant_argument_values
-    - slash_for_doc_comments
-    - avoid_final_parameters
-    - prefer_const_declarations
-    - unnecessary_overrides
-    - unawaited_futures
-    - unnecessary_final
-    - unnecessary_const
-    - prefer_single_quotes
-
-# analyzer:
-#   exclude:
-#     - path/to/excluded/files/**
-
-# For more information about the core and recommended set of lints, see
-# https://dart.dev/go/core-lints
-
-# For additional information about configuring this file, see
-# https://dart.dev/guides/language/analysis-options
+    file_names: false
+    type_annotate_public_apis: false
+    require_trailing_commas: false
+    sort_pub_dependencies: false
+    avoid_print: false
+    public_member_api_docs: false
+    lines_longer_than_80_chars: false
+    flutter_style_todos: false

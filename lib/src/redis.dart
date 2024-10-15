@@ -8,6 +8,13 @@ import 'package:ioredis/src/redis_multi_command.dart';
 import 'package:ioredis/src/redis_response.dart';
 
 class Redis {
+  Redis([RedisOptions? opt]) {
+    if (opt != null) {
+      option = opt;
+    }
+    connection = RedisConnection(option);
+    pool = RedisConnectionPool(option, connection);
+  }
   late RedisConnection connection;
 
   late RedisOptions option = defaultRedisOptions;
@@ -18,18 +25,9 @@ class Redis {
   /// subscriber, publisher or normal set and get
   RedisType redisClientType = RedisType.normal;
 
-  Redis([RedisOptions? opt]) {
-    if (opt != null) {
-      option = opt;
-    }
-    connection = RedisConnection(option);
-    pool = RedisConnectionPool(option, connection);
-  }
-
   /// Set custom socket
-  Redis setSocket(Socket socket) {
+  void setSocket(Socket socket) {
     connection.setSocket(socket);
-    return this;
   }
 
   /// Connect to redis connection
@@ -50,36 +48,38 @@ class Redis {
   }
 
   /// Set key value to redis
-  /// ```
+  /// ```dart
   /// await redis.set('foo', 'bar');
   /// ```
   Future<dynamic> set(String key, String value,
       [String? option, dynamic optionValue]) async {
-    String? val =
-        await sendCommand(getCommandToSetData(key, value, option, optionValue));
+    final val =
+        await sendCommand(getCommandToSetData(key, value, option, optionValue))
+            as String?;
     if (!RedisResponse.ok(val)) {
       throw Exception(val);
     }
   }
 
   /// Get value of a key
-  /// ```
+  /// ```dart
   /// await redis.get('foo');
   /// ```
   Future<String?> get(String key) async {
-    return await sendCommand(getCommandToGetData(key));
+    return await sendCommand(getCommandToGetData(key)) as String?;
   }
 
   /// Get value of a key
-  /// ```
+  /// ```dart
   /// await redis.get('foo');
   /// ```
   Future<List<String?>> mget(List<String> keys) async {
-    return await sendCommand(<String>['MGET', ..._setPrefixInKeys(keys)]);
+    return await sendCommand(<String>['MGET', ..._setPrefixInKeys(keys)])
+        as List<String?>;
   }
 
   /// Delete a key
-  /// ```
+  /// ```dart
   /// await redis.get('foo');
   /// ```
   Future<void> delete(String key) async {
@@ -90,7 +90,7 @@ class Redis {
   }
 
   /// Delete multiple key
-  /// ```
+  /// ```dart
   /// await redis.get('foo');
   /// ```
   Future<void> mdelete(List<String> keys) async {
@@ -98,7 +98,7 @@ class Redis {
   }
 
   /// flush all they data from currently selected DB
-  /// ```
+  /// ```dart
   /// await redis.flushdb();
   /// ```
   Future<void> flushdb() async {
@@ -106,7 +106,7 @@ class Redis {
   }
 
   /// multi commands
-  /// ```
+  /// ```dart
   /// List<dynamic> result = await redis.multi()
   ///      .set('foo', 'bar')
   ///      .set('bar', 'foo')
@@ -119,52 +119,39 @@ class Redis {
   }
 
   /// Subscribe to channel
-  /// ```
+  /// ```dart
   /// RedisSubscriber subscriber = await redis.subscribe('channel');
-  /// RedisSubscriber subscriber = await redis.subscribe(['channel', 'chat']);
   ///
   /// subscriber.onMessage = (String channel,String? message) {
   ///
   /// }
   /// ```
-  Future<RedisSubscriber> subscribe(Object channel) async {
+  Future<RedisSubscriber> subscribe(String channel) async {
     if (redisClientType == RedisType.publisher) {
       throw Exception('cannot subscribe and publish on same connection');
     }
     redisClientType = RedisType.subscriber;
-    RedisSubscriber cb = RedisSubscriber();
-    if (channel is String) {
-      await sendCommand(<String>['SUBSCRIBE', channel]);
-      connection.subscribeListeners[<String>[channel]] = cb;
-    } else if (channel is List<String>) {
-      await sendCommand(<String>['SUBSCRIBE', ...channel]);
-      connection.subscribeListeners[channel] = cb;
-    } else {
-      throw Exception('Invalid type for channel');
-    }
+
+    final cb = RedisSubscriber(channel: channel);
+    connection.subscribeListeners.add(cb);
+    unawaited(sendCommand(<String>['SUBSCRIBE', channel]));
     return cb;
   }
 
-  Future<RedisSubscriber> psubscribe(Object channel) async {
+  Future<RedisSubscriber> psubscribe(String pattern) async {
     if (redisClientType == RedisType.publisher) {
       throw Exception('cannot subscribe and publish on same connection');
     }
     redisClientType = RedisType.subscriber;
-    RedisSubscriber cb = RedisSubscriber();
-    if (channel is String) {
-      await sendCommand(<String>['PSUBSCRIBE', channel]);
-      connection.subscribeListeners[<String>[channel]] = cb;
-    } else if (channel is List<String>) {
-      await sendCommand(<String>['PSUBSCRIBE', ...channel]);
-      connection.subscribeListeners[channel] = cb;
-    } else {
-      throw Exception('Invalid type for channel');
-    }
+
+    final cb = RedisSubscriber(channel: pattern);
+    connection.subscribeListeners.add(cb);
+    unawaited(sendCommand(<String>['PSUBSCRIBE', pattern]));
     return cb;
   }
 
   /// Publish message to a channel
-  /// ```
+  /// ```dart
   /// await redis.publish('chat', 'hello')
   /// ```
   Future<void> publish(String channel, String message) async {
@@ -186,10 +173,10 @@ class Redis {
   /// get command to set data to redis
   List<String> getCommandToSetData(String key, String value,
       [String? option, dynamic optionValue]) {
-    List<String> command = <String>[
+    final command = <String>[
       'SET',
       _setPrefixInKeys(<String>[key]).first,
-      value.toString()
+      value
     ];
     if (option != null && optionValue != null) {
       command.addAll(<String>[option.toUpperCase(), optionValue.toString()]);
@@ -199,7 +186,7 @@ class Redis {
 
   /// get command to get data from redis
   List<String> getCommandToGetData(String key) {
-    List<String> command = <String>[
+    final command = <String>[
       'GET',
       _setPrefixInKeys(<String>[key]).first
     ];

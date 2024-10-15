@@ -1,4 +1,19 @@
 class RedisOptions {
+
+  RedisOptions({
+    this.keyPrefix = '',
+    this.host = '127.0.0.1',
+    this.port = 6379,
+    this.secure = false,
+    this.connectTimeout = const Duration(seconds: 10),
+    this.username,
+    this.password,
+    this.db = 0,
+    this.retryStrategy,
+    this.onError,
+    this.maxConnection = 10,
+    this.idleTimeout = const Duration(seconds: 10),
+  });
   /// timeout value for socket connection
   final Duration connectTimeout;
 
@@ -39,21 +54,6 @@ class RedisOptions {
 
   /// timeout duration of idle connection in the pool, default to 10s
   Duration idleTimeout;
-
-  RedisOptions({
-    this.keyPrefix = '',
-    this.host = '127.0.0.1',
-    this.port = 6379,
-    this.secure = false,
-    this.connectTimeout = const Duration(seconds: 10),
-    this.username,
-    this.password,
-    this.db = 0,
-    this.retryStrategy,
-    this.onError,
-    this.maxConnection = 10,
-    this.idleTimeout = const Duration(seconds: 10),
-  });
 }
 
 class RedisSetOption {}
