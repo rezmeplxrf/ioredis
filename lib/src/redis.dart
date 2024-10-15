@@ -145,6 +145,24 @@ class Redis {
     return cb;
   }
 
+  Future<RedisSubscriber> psubscribe(Object channel) async {
+    if (redisClientType == RedisType.publisher) {
+      throw Exception('cannot subscribe and publish on same connection');
+    }
+    redisClientType = RedisType.subscriber;
+    RedisSubscriber cb = RedisSubscriber();
+    if (channel is String) {
+      await sendCommand(<String>['PSUBSCRIBE', channel]);
+      connection.subscribeListeners[<String>[channel]] = cb;
+    } else if (channel is List<String>) {
+      await sendCommand(<String>['PSUBSCRIBE', ...channel]);
+      connection.subscribeListeners[channel] = cb;
+    } else {
+      throw Exception('Invalid type for channel');
+    }
+    return cb;
+  }
+
   /// Publish message to a channel
   /// ```
   /// await redis.publish('chat', 'hello')
