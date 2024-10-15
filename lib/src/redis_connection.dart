@@ -113,54 +113,52 @@ class RedisConnection {
   }
 
   /// Listen response from redis and sent to completer ro callback.
-/// onDone callback is use to listen redis disconnect to reconnect
-void _listenResponseFromRedis() {
-  Stream<String>? s = _redisSocket?.transform<String>(transformer);
-  _stream = s?.transform<dynamic>(redisResponseTransformer);
+  /// onDone callback is use to listen redis disconnect to reconnect
+  void _listenResponseFromRedis() {
+    Stream<String>? s = _redisSocket?.transform<String>(transformer);
+    _stream = s?.transform<dynamic>(redisResponseTransformer);
 
-  _stream?.listen((dynamic packet) {
-    /// If packet is from pub/sub
-    if (packet is List) {
-      print('packet: $packet');
-      String type = packet[0];
-      print('type: $type');
-      if (type == 'message') {
-        String channel = packet[1];
-        String message = packet[2];
-        RedisSubscriber? cb = _findSubscribeListener(channel);
+    _stream?.listen((dynamic packet) {
+      /// If packet is from pub/sub
+      if (packet is List) {
+        String type = packet[0];
+        if (type == 'message') {
+          String channel = packet[1];
+          String message = packet[2];
+          RedisSubscriber? cb = _findSubscribeListener(channel);
 
-        if (cb?.onMessage != null) {
-          cb?.onMessage!(channel, message);
+          if (cb?.onMessage != null) {
+            cb?.onMessage!(channel, message);
+          }
+        } else if (type == 'pmessage') {
+          String pattern = packet[1];
+          String channel = packet[2];
+          String message = packet[3];
+          RedisSubscriber? cb = _findSubscribeListener(pattern);
+
+          if (cb?.onMessage != null) {
+            cb?.onMessage!(channel, message);
+          }
         }
-      } else if (type == 'pmessage') {
-        String pattern = packet[1];
-        String channel = packet[2];
-        String message = packet[3];
-        RedisSubscriber? cb = _findSubscribeListener(pattern);
-
-        if (cb?.onMessage != null) {
-          cb?.onMessage!(channel, message);
+      } else {
+        if (_completer?.isCompleted == false) {
+          _completer?.complete(packet);
+          _completer = null;
         }
       }
-    } else {
-      if (_completer?.isCompleted == false) {
-        _completer?.complete(packet);
-        _completer = null;
-      }
-    }
-  }, onDone: () async {
-    /// Destroy existing socket
-    /// and setting null to create again on reconnect
-    _redisSocket?.destroy();
-    _redisSocket = null;
+    }, onDone: () async {
+      /// Destroy existing socket
+      /// and setting null to create again on reconnect
+      _redisSocket?.destroy();
+      _redisSocket = null;
 
-    _throwSafeError(
-      SocketException('Redis disconnected',
-          address: InternetAddress(option.host), port: option.port),
-    );
-    await _reconnect();
-  });
-}
+      _throwSafeError(
+        SocketException('Redis disconnected',
+            address: InternetAddress(option.host), port: option.port),
+      );
+      await _reconnect();
+    });
+  }
 
   /// Disconnect redis connection
   Future<void> disconnect() async {
@@ -223,19 +221,21 @@ void _listenResponseFromRedis() {
     return value;
   }
 
-/// Get subscribe listener callback related to the channel or pattern
-RedisSubscriber? _findSubscribeListener(String channel) {
-  List<List<String>> channelsLists = subscribeListeners.keys.toList();
-  channelsLists = channelsLists
-      .where((List<String> element) =>
-          element.contains(channel) || element.any((String pattern) => RegExp(pattern).hasMatch(channel)))
-      .toList();
-  if (channelsLists.isNotEmpty) {
-    List<String>? channels = channelsLists.first;
-    return subscribeListeners[channels];
+  /// Get subscribe listener callback related to the channel or pattern
+  /// Get subscribe listener callback related to the channel or pattern
+  RedisSubscriber? _findSubscribeListener(String channelOrPattern) {
+    for (List<String> key in subscribeListeners.keys) {
+      if (key.contains(channelOrPattern)) {
+        return subscribeListeners[key];
+      }
+      for (String pattern in key) {
+        if (RegExp(pattern).hasMatch(channelOrPattern)) {
+          return subscribeListeners[key];
+        }
+      }
+    }
+    return null;
   }
-  return null;
-}
 
   /// Login to redis
   Future<dynamic> _login() async {
