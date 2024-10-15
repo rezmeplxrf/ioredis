@@ -120,13 +120,25 @@ class RedisConnection {
 
     _stream?.listen((dynamic packet) {
       /// If packet is from pub/sub
-      if (packet is List && packet[0] == 'message') {
-        String channel = packet[1];
-        String message = packet[2];
-        RedisSubscriber? cb = _findSubscribeListener(channel);
+      if (packet is List) {
+        String type = packet[0];
+        if (type == 'message') {
+          String channel = packet[1];
+          String message = packet[2];
+          RedisSubscriber? cb = _findSubscribeListener(channel);
 
-        if (cb?.onMessage != null) {
-          cb?.onMessage!(channel, message);
+          if (cb?.onMessage != null) {
+            cb?.onMessage!(channel, message);
+          }
+        } else if (type == 'pmessage') {
+          String pattern = packet[1];
+          String channel = packet[2];
+          String message = packet[3];
+          RedisSubscriber? cb = _findSubscribeListener(pattern);
+
+          if (cb?.onMessage != null) {
+            cb?.onMessage!(channel, message);
+          }
         }
       } else {
         if (_completer?.isCompleted == false) {
