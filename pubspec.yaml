@@ -1,6 +1,6 @@
 name: ioredis
 description: Redis driver for dart
-version: 1.0.6
+version: 1.0.7
 repository: https://github.com/dartondox/ioredis
 
 environment:
