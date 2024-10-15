@@ -121,7 +121,6 @@ class RedisConnection {
     _stream?.listen((dynamic packet) {
       /// If packet is from pub/sub
       if (packet is List) {
-        print('packet from pub/sub: $packet');
         String type = packet[0];
         if (type == 'message') {
           String channel = packet[1];
@@ -132,10 +131,9 @@ class RedisConnection {
             cb?.onMessage!(channel, message);
           }
         } else if (type == 'pmessage') {
-          String pattern = packet[1];
           String channel = packet[2];
           String message = packet[3];
-          RedisSubscriber? cb = _findSubscribeListener(pattern);
+          RedisSubscriber? cb = _findSubscribeListener(channel);
 
           if (cb?.onMessage != null) {
             cb?.onMessage!(channel, message);
