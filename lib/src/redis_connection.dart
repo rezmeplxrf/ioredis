@@ -121,6 +121,7 @@ class RedisConnection {
     _stream?.listen((dynamic packet) {
       /// If packet is from pub/sub
       if (packet is List) {
+        print('packet from pub/sub: $packet');
         String type = packet[0];
         if (type == 'message') {
           String channel = packet[1];
