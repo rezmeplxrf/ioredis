@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:ioredis/ioredis.dart';
@@ -199,5 +200,37 @@ class Redis {
         .map((String k) =>
             option.keyPrefix.isNotEmpty ? '${option.keyPrefix}:$k' : k)
         .toList();
+  }
+
+  /// Get JSON value
+  /// ```dart
+  /// String? value = await redis.jsonGet('key', '$.path');
+  /// ```
+  Future<String?> jsonGet(String key, String path) async {
+    return await sendCommand(['JSON.GET', key, path]) as String?;
+  }
+
+  /// Set JSON value
+  /// ```dart
+  /// await redis.jsonSet('key', '$.path', '{"name":"John"}');
+  /// ```
+  Future<dynamic> jsonSet(String key, String path, dynamic jsonValue) async {
+    // Convert the jsonValue to a JSON string if it's not already a string
+    String jsonString;
+    if (jsonValue is String) {
+      jsonString = jsonValue;
+    } else {
+      try {
+        jsonString = jsonEncode(jsonValue);
+      } catch (e) {
+        throw ArgumentError('Invalid JSON value');
+      }
+    }
+
+    final val =
+        await sendCommand(['JSON.SET', key, path, jsonString]) as String?;
+    if (!RedisResponse.ok(val)) {
+      throw Exception(val);
+    }
   }
 }
