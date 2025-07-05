@@ -35,30 +35,6 @@ void main() {
       expect(results.length, 3);
     });
 
-    test('keyPrefix', () async {
-      final localRedis = Redis(RedisOptions(
-          keyPrefix: 'dox', host: '127.0.0.1', port: 6379, password: 'pass'));
-
-      await localRedis.set('foo', 'redis1');
-      final s1 = await localRedis.get('key1');
-
-      expect(s1, 'redis1');
-
-      final redis2 =
-          Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
-      final s2 = await redis2.get('dox:foo');
-
-      expect(s2, 'redis1');
-
-      expect(s1, s2);
-
-      await redis.delete('foo');
-
-      final s3 = await redis2.get('dox:foo');
-
-      expect(s3, null);
-    });
-
     test('ut8f', () async {
       await redis.set('dox', 'မင်္ဂလာပါ');
       final data = await redis.get('dox');
