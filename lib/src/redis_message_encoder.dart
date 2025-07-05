@@ -2,6 +2,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 class RedisMessageEncoder {
+  RedisMessageEncoder() {
+    if (_lengthCache.isEmpty) {
+      _initCache();
+    }
+  }
   // Pre-allocated constants to avoid repeated allocations
   static const List<int> _semicolon = [58]; // ':'
   static const List<int> _crlf = [13, 10]; // '\r\n'
@@ -14,14 +19,8 @@ class RedisMessageEncoder {
 
   // Pre-populate cache for common lengths
   static void _initCache() {
-    for (int i = 0; i <= 100; i++) {
+    for (var i = 0; i <= 100; i++) {
       _lengthCache[i] = ascii.encode(i.toString());
-    }
-  }
-
-  RedisMessageEncoder() {
-    if (_lengthCache.isEmpty) {
-      _initCache();
     }
   }
 

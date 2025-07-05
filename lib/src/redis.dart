@@ -75,8 +75,12 @@ class Redis {
   /// await redis.get('foo');
   /// ```
   Future<List<String?>> mget(List<String> keys) async {
-    return await sendCommand(<String>['MGET', ..._setPrefixInKeys(keys)])
-        as List<String?>;
+    final result =
+        await sendCommand(<String>['MGET', ..._setPrefixInKeys(keys)]);
+    if (result is List) {
+      return List<String?>.from(result);
+    }
+    return <String?>[];
   }
 
   /// Delete a key

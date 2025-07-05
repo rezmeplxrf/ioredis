@@ -90,7 +90,7 @@ class RedisConnectionPool {
     if (_poolConnections.isEmpty) return 1;
 
     // More efficient approach: find the maximum key and increment
-    int maxKey = 0;
+    var maxKey = 0;
     for (final key in _poolConnections.keys) {
       if (key > maxKey) maxKey = key;
     }

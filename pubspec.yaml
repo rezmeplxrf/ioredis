@@ -1,5 +1,5 @@
 name: ioredis
-description: Redis driver for dart
+description: A high-performance Redis client for Dart with support for pub/sub, JSON operations, Unicode, and bulk operations.
 version: 1.1.1
 repository: https://github.com/dartondox/ioredis
 

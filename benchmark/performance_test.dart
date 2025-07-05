@@ -1,5 +1,5 @@
-import 'package:ioredis/src/redis_response.dart';
 import 'package:ioredis/src/redis_message_encoder.dart';
+import 'package:ioredis/src/redis_response.dart';
 
 void main() {
   // Performance benchmark for the optimized Redis response parsing
@@ -11,17 +11,17 @@ void benchmarkResponseParsing() {
   print('=== Redis Response Parsing Benchmark ===');
 
   // Test data
-  final simpleString = '+OK\r\n';
-  final bulkString = '\$5\r\nhello\r\n';
-  final integerResponse = ':42\r\n';
-  final arrayResponse = '*3\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n\$3\r\nbaz\r\n';
-  final errorResponse = '-Error message\r\n';
+  const simpleString = '+OK\r\n';
+  const bulkString = '\$5\r\nhello\r\n';
+  const integerResponse = ':42\r\n';
+  const arrayResponse = '*3\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n\$3\r\nbaz\r\n';
+  const errorResponse = '-Error message\r\n';
 
-  final iterations = 100000;
+  const iterations = 100000;
 
   // Benchmark simple string parsing
   final sw1 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     RedisResponse.transform(simpleString);
   }
   sw1.stop();
@@ -31,7 +31,7 @@ void benchmarkResponseParsing() {
 
   // Benchmark bulk string parsing
   final sw2 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     RedisResponse.transform(bulkString);
   }
   sw2.stop();
@@ -41,7 +41,7 @@ void benchmarkResponseParsing() {
 
   // Benchmark integer parsing
   final sw3 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     RedisResponse.transform(integerResponse);
   }
   sw3.stop();
@@ -51,7 +51,7 @@ void benchmarkResponseParsing() {
 
   // Benchmark array parsing
   final sw4 = Stopwatch()..start();
-  for (int i = 0; i < 10000; i++) {
+  for (var i = 0; i < 10000; i++) {
     // Fewer iterations for arrays as they're more complex
     RedisResponse.transform(arrayResponse);
   }
@@ -61,7 +61,7 @@ void benchmarkResponseParsing() {
 
   // Benchmark error parsing
   final sw5 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     RedisResponse.transform(errorResponse);
   }
   sw5.stop();
@@ -76,11 +76,11 @@ void benchmarkMessageEncoding() {
   print('=== Redis Message Encoding Benchmark ===');
 
   final encoder = RedisMessageEncoder();
-  final iterations = 100000;
+  const iterations = 100000;
 
   // Test simple string encoding
   final sw1 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     encoder.encode('hello');
   }
   sw1.stop();
@@ -91,7 +91,7 @@ void benchmarkMessageEncoding() {
   // Test array encoding
   final testArray = ['GET', 'key'];
   final sw2 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     encoder.encode(testArray);
   }
   sw2.stop();
@@ -101,7 +101,7 @@ void benchmarkMessageEncoding() {
 
   // Test integer encoding
   final sw3 = Stopwatch()..start();
-  for (int i = 0; i < iterations; i++) {
+  for (var i = 0; i < iterations; i++) {
     encoder.encode(42);
   }
   sw3.stop();
@@ -112,7 +112,7 @@ void benchmarkMessageEncoding() {
   // Test large array encoding
   final largeArray = List.generate(100, (i) => 'item$i');
   final sw4 = Stopwatch()..start();
-  for (int i = 0; i < 1000; i++) {
+  for (var i = 0; i < 1000; i++) {
     // Fewer iterations for large arrays
     encoder.encode(largeArray);
   }
