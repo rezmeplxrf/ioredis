@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:collection/collection.dart';
 import 'package:ioredis/ioredis.dart';
@@ -173,7 +174,9 @@ class RedisConnection {
   /// Handle connection reconnect
   Future<void> _reconnect() async {
     if (_shouldReconnect) {
-      await Future<void>.delayed(option.retryStrategy!(_totalRetry));
+      final retryDelay = option.retryStrategy?.call(_totalRetry) ??
+          Duration(milliseconds: min(_totalRetry * 50, 2000));
+      await Future<void>.delayed(retryDelay);
       await connect();
     }
   }
