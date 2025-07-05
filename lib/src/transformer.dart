@@ -111,9 +111,7 @@ class BufferedRedisResponseTransformer
         return (result, remaining);
 
       case '*': // Array
-        // For arrays, we need to parse them completely
-        // This is more complex, so let's use the original parsing for now
-        // and fall back to waiting for more data if needed
+
         final result = RedisResponse.transform(_buffer);
         if (result != null) {
           return (result, '');
