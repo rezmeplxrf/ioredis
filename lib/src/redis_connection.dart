@@ -124,7 +124,7 @@ class RedisConnection {
     _stream?.listen(
       (dynamic packet) {
         try {
-          if (packet is List && packet.isNotEmpty) {
+          if (packet is List && packet.isNotEmpty && packet[0] is String) {
             final type = packet[0] as String;
             final pmessage = type == 'pmessage';
             final rmessage = type == 'message';

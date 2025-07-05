@@ -78,7 +78,7 @@ class Redis {
     final result =
         await sendCommand(<String>['MGET', ..._setPrefixInKeys(keys)]);
     if (result is List) {
-      return List<String?>.from(result);
+      return result.cast<String?>();
     }
     return <String?>[];
   }
