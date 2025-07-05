@@ -1,4 +1,4 @@
-// ignore_for_file: avoid_redundant_argument_values, use_is_even_rather_than_modulo
+// ignore_for_file: avoid_redundant_argument_values, use_is_even_rather_than_modulo, use_raw_strings
 
 import 'dart:io';
 
@@ -112,7 +112,7 @@ void main() {
       await redis.set('B', '+BB');
       await redis.set('C', 'CC');
       final res = await redis.mget(<String>['A', 'B', 'C', 'D']);
-      expect(<String?>['-AA', '+BB', 'CC'], res);
+      expect(<String?>['-AA', '+BB', 'CC', null], res);
     });
 
     test('test expiry time', () async {
@@ -138,10 +138,9 @@ void main() {
 
     // Array and List Tests
     test('MGET with empty list', () async {
-      // Skip this test as the implementation doesn't handle empty lists properly
-      // final res = await redis.mget(<String>[]);
-      // expect(res, isEmpty);
-    }, skip: 'Library has issues with empty MGET lists');
+      final res = await redis.mget(<String>[]);
+      expect(res, isEmpty);
+    });
 
     test('MGET with single non-existent key', () async {
       final res = await redis.mget(<String>['nonexistent_single']);

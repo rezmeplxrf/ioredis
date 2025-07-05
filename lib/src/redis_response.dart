@@ -140,42 +140,51 @@ class RedisResponse {
 
     final countStr = s.substring(1, crlfIndex);
     final count = int.tryParse(countStr);
-    if (count == null || count <= 0) return [];
+    if (count == null) return [];
+    if (count <= 0) return List<String?>.filled(count == 0 ? 0 : 0, null);
 
     final elements = <String?>[];
     var position = crlfIndex + 2;
     var currentIndex = 0;
-    var pendingBulkString = '';
 
     while (currentIndex < count && position < s.length) {
-      if (pendingBulkString.isNotEmpty) {
-        // We're in the middle of parsing a bulk string
-        final nextCrlfIndex = s.indexOf(_crlf, position);
-        if (nextCrlfIndex == -1) break;
+      // Find the next element's end
+      final nextCrlfIndex = s.indexOf(_crlf, position);
+      if (nextCrlfIndex == -1) break;
 
-        final element =
-            pendingBulkString + s.substring(position, nextCrlfIndex + 2);
-        elements.add(transform(element) as String?);
-        pendingBulkString = '';
-        position = nextCrlfIndex + 2;
-        currentIndex++;
-      } else {
-        // Find the next element
-        final nextCrlfIndex = s.indexOf(_crlf, position);
-        if (nextCrlfIndex == -1) break;
+      final element = s.substring(position, nextCrlfIndex + 2);
 
-        final element = s.substring(position, nextCrlfIndex + 2);
+      if (element.isNotEmpty && element.codeUnitAt(0) == _CharCodes.dollar) {
+        // This is a bulk string
+        final lengthStr = element.substring(1, element.length - 2);
+        final length = int.tryParse(lengthStr);
 
-        if (element.isNotEmpty && element.codeUnitAt(0) == _CharCodes.dollar) {
-          // This is a bulk string, we need to get the next line too
-          pendingBulkString = element;
-          position = nextCrlfIndex + 2;
-        } else {
-          // This is a simple element
-          elements.add(transform(element) as String?);
+        if (length == null) break;
+
+        if (length == -1) {
+          // Null bulk string
+          elements.add(null);
           position = nextCrlfIndex + 2;
           currentIndex++;
+        } else {
+          // Non-null bulk string - need to get the actual data
+          final dataStartIndex = nextCrlfIndex + 2;
+          if (dataStartIndex >= s.length) break;
+
+          // Find the end of the data (another \r\n after the data)
+          final dataEndIndex = dataStartIndex + length;
+          if (dataEndIndex + 2 > s.length) break;
+
+          final data = s.substring(dataStartIndex, dataEndIndex);
+          elements.add(data);
+          position = dataEndIndex + 2; // Skip the final \r\n
+          currentIndex++;
         }
+      } else {
+        // This is a simple element
+        elements.add(transform(element) as String?);
+        position = nextCrlfIndex + 2;
+        currentIndex++;
       }
     }
 
