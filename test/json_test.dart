@@ -12,7 +12,8 @@ import 'package:test/test.dart';
 //   redis/redis-stack:latest
 
 void main() async {
-  final redis = Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
+  final redis =
+      Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
 
   setUpAll(() async {
     await redis.connect();
