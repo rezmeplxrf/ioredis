@@ -1,4 +1,4 @@
-// ignore_for_file: avoid_redundant_argument_values
+// ignore_for_file: avoid_redundant_argument_values, use_is_even_rather_than_modulo
 
 import 'dart:io';
 
@@ -203,7 +203,7 @@ void main() {
     });
 
     test('binary-like data with null bytes', () async {
-      final binaryData = 'Hello\x00World\x00\x01\x02\x03\xFF';
+      const binaryData = 'Hello\x00World\x00\x01\x02\x03\xFF';
       await redis.set('binary_key', binaryData);
       final retrievedValue = await redis.get('binary_key');
       expect(retrievedValue, equals(binaryData));
@@ -217,21 +217,21 @@ void main() {
     });
 
     test('whitespace-only value', () async {
-      final whitespaceValue = '   \t\n\r   ';
+      const whitespaceValue = '   \t\n\r   ';
       await redis.set('whitespace_key', whitespaceValue);
       final retrievedValue = await redis.get('whitespace_key');
       expect(retrievedValue, equals(whitespaceValue));
     });
 
     test('special characters in key', () async {
-      final specialKey = 'key:with:colons-and-dashes_and_underscores.and.dots';
+      const specialKey = 'key:with:colons-and-dashes_and_underscores.and.dots';
       await redis.set(specialKey, 'special_value');
       final retrievedValue = await redis.get(specialKey);
       expect(retrievedValue, equals('special_value'));
     });
 
     test('unicode and emoji values', () async {
-      final unicodeValue = '🚀 Hello 世界 🌍 Émojis & Ünïcødé 👨‍💻';
+      const unicodeValue = '🚀 Hello 世界 🌍 Émojis & Ünïcødé 👨‍💻';
       await redis.set('unicode_key', unicodeValue);
       final retrievedValue = await redis.get('unicode_key');
       expect(retrievedValue, equals(unicodeValue));
@@ -245,7 +245,7 @@ void main() {
     });
 
     test('JSON string values', () async {
-      final jsonValue =
+      const jsonValue =
           '{"name": "John", "age": 30, "city": "New York", "active": true, "scores": [85, 92, 78]}';
       await redis.set('json_key', jsonValue);
       final retrievedValue = await redis.get('json_key');
@@ -253,7 +253,7 @@ void main() {
     });
 
     test('newline characters in value', () async {
-      final multilineValue = 'Line 1\nLine 2\r\nLine 3\n\nLine 5';
+      const multilineValue = 'Line 1\nLine 2\r\nLine 3\n\nLine 5';
       await redis.set('multiline_key', multilineValue);
       final retrievedValue = await redis.get('multiline_key');
       expect(retrievedValue, equals(multilineValue));
