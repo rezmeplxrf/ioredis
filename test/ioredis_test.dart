@@ -6,9 +6,8 @@ import 'package:test/test.dart';
 void main() {
   group('Redis |', () {
     test('race request', () async {
-      final redis = Redis(RedisOptions(
-        idleTimeout: const Duration(seconds: 3),
-      ));
+      final redis =
+          Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
 
       await redis.set('key1', 'redis1');
       await redis.set('key2', 'redis2');
@@ -28,7 +27,8 @@ void main() {
     });
 
     test('keyPrefix', () async {
-      final redis = Redis(RedisOptions(keyPrefix: 'dox'));
+      final redis = Redis(RedisOptions(
+          keyPrefix: 'dox', host: '127.0.0.1', port: 6379, password: 'pass'));
 
       await redis.set('foo', 'redis1');
       final s1 = await redis.get('key1');

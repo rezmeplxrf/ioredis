@@ -86,15 +86,27 @@ class BufferedRedisResponseTransformer
 
         // Check if we have the complete bulk string
         final dataStartIndex = firstCrlfIndex + 2;
-        final dataEndIndex = dataStartIndex + length;
-        final messageEndIndex = dataEndIndex + 2; // +2 for final \r\n
 
-        if (_buffer.length < messageEndIndex) {
+        // Convert to bytes to properly handle UTF-8 length
+        final bufferBytes = utf8.encode(_buffer);
+        final headerBytes = utf8.encode(_buffer.substring(0, dataStartIndex));
+        final requiredBytes =
+            headerBytes.length + length + 2; // +2 for final \r\n
+
+        if (bufferBytes.length < requiredBytes) {
           return null; // Need more data
         }
 
-        final responseStr = _buffer.substring(0, messageEndIndex);
-        final remaining = _buffer.substring(messageEndIndex);
+        // Convert back to string by finding the correct character boundary
+        String responseStr;
+        try {
+          final responseBytes = bufferBytes.sublist(0, requiredBytes);
+          responseStr = utf8.decode(responseBytes);
+        } catch (e) {
+          return null; // Invalid UTF-8 sequence
+        }
+
+        final remaining = utf8.decode(bufferBytes.sublist(requiredBytes));
         final result = RedisResponse.transform(responseStr);
         return (result, remaining);
 

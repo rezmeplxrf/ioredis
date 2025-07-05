@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 enum RedisResponseConstant {
   ok('OK'),
   simpleString('+'),
@@ -49,14 +51,21 @@ class RedisResponse {
     // Check for null bulk string
     if (length == -1) return null;
 
-    // Extract the data part based on the specified length
+    // Extract the data part based on the specified byte length
     final dataStartIndex = firstCrlfIndex + 2;
-    final dataEndIndex = dataStartIndex + length;
 
-    // Make sure we have enough data
-    if (s.length < dataEndIndex) return null;
+    // Convert to bytes to handle proper length calculation for UTF-8
+    final bytes = utf8.encode(s);
+    final dataStartByteIndex =
+        utf8.encode(s.substring(0, dataStartIndex)).length;
+    final dataEndByteIndex = dataStartByteIndex + length;
 
-    return s.substring(dataStartIndex, dataEndIndex);
+    // Make sure we have enough bytes
+    if (bytes.length < dataEndByteIndex) return null;
+
+    // Extract the data bytes and decode back to string
+    final dataBytes = bytes.sublist(dataStartByteIndex, dataEndByteIndex);
+    return utf8.decode(dataBytes);
   }
 
   static List<String?> toArrayString(String s) {
