@@ -36,9 +36,28 @@ class RedisResponse {
   }
 
   static String? toBulkString(String s) {
-    final listOfData = s.split('\r\n');
-    if (listOfData[1].isEmpty) return null;
-    return listOfData[1];
+    // Parse Redis bulk string format: $<length>\r\n<data>\r\n
+    if (!s.startsWith('\$')) return null;
+    
+    final firstCrlfIndex = s.indexOf('\r\n');
+    if (firstCrlfIndex == -1) return null;
+    
+    final lengthStr = s.substring(1, firstCrlfIndex);
+    final length = int.tryParse(lengthStr);
+    
+    if (length == null) return null;
+    
+    // Check for null bulk string
+    if (length == -1) return null;
+    
+    // Extract the data part based on the specified length
+    final dataStartIndex = firstCrlfIndex + 2;
+    final dataEndIndex = dataStartIndex + length;
+    
+    // Make sure we have enough data
+    if (s.length < dataEndIndex) return null;
+    
+    return s.substring(dataStartIndex, dataEndIndex);
   }
 
   static List<String?> toArrayString(String s) {
