@@ -68,7 +68,7 @@ class BufferedRedisResponseTransformer
         final result = RedisResponse.transform(responseStr);
         return (result, remaining);
 
-      case '\$': // Bulk string
+      case r'$': // Bulk string
         final firstCrlfIndex = _buffer.indexOf('\r\n');
         if (firstCrlfIndex == -1) return null; // Need more data
 

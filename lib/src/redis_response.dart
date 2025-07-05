@@ -38,7 +38,7 @@ class RedisResponse {
 
   static String? toBulkString(String s) {
     // Parse Redis bulk string format: $<length>\r\n<data>\r\n
-    if (!s.startsWith('\$')) return null;
+    if (!s.startsWith(r'$')) return null;
 
     final firstCrlfIndex = s.indexOf('\r\n');
     if (firstCrlfIndex == -1) return null;
