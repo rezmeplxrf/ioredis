@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_redundant_argument_values
+
 import 'dart:io';
 
 import 'package:ioredis/ioredis.dart';
@@ -5,10 +7,17 @@ import 'package:test/test.dart';
 
 void main() {
   group('Redis |', () {
+    late final Redis redis;
+    final commonOptions =
+        RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass');
+    setUpAll(() async {
+      redis = Redis(commonOptions);
+    });
+    tearDownAll(() async {
+      await redis.disconnect();
+      exit(0);
+    });
     test('race request', () async {
-      final redis =
-          Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
-
       await redis.set('key1', 'redis1');
       await redis.set('key2', 'redis2');
       await redis.set('key3', 'redis3');
@@ -27,15 +36,16 @@ void main() {
     });
 
     test('keyPrefix', () async {
-      final redis = Redis(RedisOptions(
+      final localRedis = Redis(RedisOptions(
           keyPrefix: 'dox', host: '127.0.0.1', port: 6379, password: 'pass'));
 
-      await redis.set('foo', 'redis1');
-      final s1 = await redis.get('key1');
+      await localRedis.set('foo', 'redis1');
+      final s1 = await localRedis.get('key1');
 
       expect(s1, 'redis1');
 
-      final redis2 = Redis();
+      final redis2 =
+          Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
       final s2 = await redis2.get('dox:foo');
 
       expect(s2, 'redis1');
@@ -50,9 +60,6 @@ void main() {
     });
 
     test('ut8f', () async {
-      final redis = Redis(RedisOptions(
-        port: 8379,
-      ));
       await redis.set('dox', 'မင်္ဂလာပါ');
       final data = await redis.get('dox');
       expect(data, 'မင်္ဂလာပါ');
@@ -67,8 +74,6 @@ void main() {
     });
 
     test('test', () async {
-      final redis = Redis(RedisOptions(port: 8379));
-
       await redis.set('dox', r'$Dox Framework');
       await redis.set('dox2', '*framework');
 
@@ -80,8 +85,8 @@ void main() {
     });
 
     test('different db', () async {
-      final db1 = Redis(RedisOptions(port: 8379));
-      final db2 = Redis(RedisOptions(port: 8379, db: 2));
+      final db1 = Redis(commonOptions);
+      final db2 = Redis(RedisOptions(port: commonOptions.port, db: 2));
 
       await db1.set('dox', 'value1');
       await db2.set('dox', 'value2');
@@ -93,20 +98,19 @@ void main() {
     });
 
     test('duplicate', () async {
-      final db1 = Redis(RedisOptions(port: 8379));
-      final db2 = db1.duplicate();
+      final db2 = redis.duplicate();
 
-      await db1.set('dox', 'value1');
+      await redis.set('dox', 'value1');
       await db2.set('dox', 'value2');
 
-      final data1 = await db1.get('dox');
+      final data1 = await redis.get('dox');
       final data2 = await db2.get('dox');
 
       expect(data1, data2);
     });
 
     test('pub/sub', () async {
-      final sub = Redis(RedisOptions(username: 'default'));
+      final sub = Redis(commonOptions);
 
       final subscriber1 = await sub.subscribe('chat1');
       subscriber1.onMessage = (String channel, String? message) {
@@ -128,12 +132,6 @@ void main() {
     });
 
     test('MGET', () async {
-      final redis = Redis(
-        RedisOptions(
-          port: 8379,
-        ),
-      );
-
       await redis.set('A', '-AA');
       await redis.set('B', '+BB');
       await redis.set('C', 'CC');
@@ -142,12 +140,6 @@ void main() {
     });
 
     test('test expiry time', () async {
-      final redis = Redis(
-        RedisOptions(
-          port: 8379,
-        ),
-      );
-
       await redis.set(
         'something',
         'Dox Framework',
