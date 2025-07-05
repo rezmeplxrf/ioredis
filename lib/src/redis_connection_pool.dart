@@ -4,9 +4,9 @@ import 'dart:math';
 import 'package:ioredis/ioredis.dart';
 
 class RedisConnectionPool {
-
   /// Class constructor
   RedisConnectionPool(this.option, this.mainConnection);
+
   /// Main connection to send command
   final RedisConnection mainConnection;
 
@@ -19,6 +19,9 @@ class RedisConnectionPool {
   /// Redis option
   final RedisOptions option;
 
+  /// Cache for random number generation
+  final Random _random = Random();
+
   /// Send command to connection
   Future<dynamic> sendCommand(List<String> commandList) {
     /// If there is idle connection use idle connection
@@ -30,7 +33,7 @@ class RedisConnectionPool {
     }
 
     /// If no idle connection create new connection if not over maxConnection yet.
-    if (_getTotalPoolConnections() < option.maxConnection - 1) {
+    if (_poolConnections.length < option.maxConnection - 1) {
       final connId = _getNewIdForPoolConnection();
       final conn = RedisConnection(option);
       _poolConnections[connId] = conn;
@@ -53,60 +56,54 @@ class RedisConnectionPool {
 
   /// get not busy connection with connected state to send command
   MapEntry<int, RedisConnection>? _getIdleConnection() {
-    final connections = _poolConnections.entries
-        .where((MapEntry<int, RedisConnection> element) =>
-            element.value.isBusy == false &&
-            element.value.status == RedisConnectionStatus.connected)
-        .toList();
-    return connections.isEmpty ? null : connections.first;
+    // Use more efficient iteration for better performance
+    for (final entry in _poolConnections.entries) {
+      if (!entry.value.isBusy &&
+          entry.value.status == RedisConnectionStatus.connected) {
+        return entry;
+      }
+    }
+    return null;
   }
 
   /// get random connection with connected state to send command
   MapEntry<int, RedisConnection>? _getRandomConnection() {
     if (_poolConnections.isEmpty) return null;
-    final keys = _poolConnections.keys.toList();
 
-    final randomIndex = Random().nextInt(keys.length);
-    final randomKey = keys[randomIndex];
+    // Get all connected connections first
+    final connectedConnections = <MapEntry<int, RedisConnection>>[];
+    for (final entry in _poolConnections.entries) {
+      if (entry.value.status == RedisConnectionStatus.connected) {
+        connectedConnections.add(entry);
+      }
+    }
 
-    final connections = _poolConnections.entries
-        .where((MapEntry<int, RedisConnection> element) =>
-            element.key == randomKey &&
-            element.value.status == RedisConnectionStatus.connected)
-        .toList();
+    if (connectedConnections.isEmpty) return null;
 
-    return connections.isEmpty ? null : connections.first;
-  }
-
-  /// get current total pool connections
-  int _getTotalPoolConnections() {
-    final keys = _poolConnections.keys.toList();
-    return keys.length;
+    // Return a random connected connection
+    final randomIndex = _random.nextInt(connectedConnections.length);
+    return connectedConnections[randomIndex];
   }
 
   /// get new id for pool connection
   int _getNewIdForPoolConnection() {
-    final keys = _poolConnections.keys.toList();
+    if (_poolConnections.isEmpty) return 1;
 
-    /// sort max -> min to get the biggest number
-    keys.sort((int a, int b) => b.compareTo(a));
-
-    if (keys.isNotEmpty) {
-      /// if max number is greater than 1000000, reset to 1,
-      /// else +1 to max number
-      return keys[0] > 1000000 ? 1 : keys[0] + 1;
-    } else {
-      /// initial id to 1
-      return 1;
+    // More efficient approach: find the maximum key and increment
+    int maxKey = 0;
+    for (final key in _poolConnections.keys) {
+      if (key > maxKey) maxKey = key;
     }
+
+    // Reset to 1 if we reach the limit, otherwise increment
+    return maxKey > 1000000 ? 1 : maxKey + 1;
   }
 
   /// Reset timer
   void _resetTimer(int connId) {
     final timer = _poolConnectionTimers[connId];
-    if (timer != null) {
-      timer.cancel();
-    }
+    timer?.cancel();
+
     _poolConnectionTimers[connId] = Timer(option.idleTimeout, () {
       _destroyAndRemove(connId);
     });
@@ -114,11 +111,30 @@ class RedisConnectionPool {
 
   /// remove connection
   void _destroyAndRemove(int connId) {
-    final c = _poolConnections[connId];
-    if (c != null) {
-      c.destroy();
-      // remove only after destroyed
+    final connection = _poolConnections[connId];
+    if (connection != null) {
+      connection.destroy();
       _poolConnections.remove(connId);
     }
+
+    // Also clean up the timer
+    final timer = _poolConnectionTimers[connId];
+    if (timer != null) {
+      timer.cancel();
+      _poolConnectionTimers.remove(connId);
+    }
+  }
+
+  /// Clean up all connections and timers
+  void dispose() {
+    for (final timer in _poolConnectionTimers.values) {
+      timer.cancel();
+    }
+    _poolConnectionTimers.clear();
+
+    for (final connection in _poolConnections.values) {
+      connection.destroy();
+    }
+    _poolConnections.clear();
   }
 }

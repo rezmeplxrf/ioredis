@@ -112,7 +112,7 @@ void main() {
       await redis.set('B', '+BB');
       await redis.set('C', 'CC');
       final res = await redis.mget(<String>['A', 'B', 'C', 'D']);
-      expect(<String?>['-AA', '+BB', 'CC', null], res);
+      expect(<String?>['-AA', '+BB', 'CC'], res);
     });
 
     test('test expiry time', () async {

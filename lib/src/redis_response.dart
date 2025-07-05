@@ -12,6 +12,17 @@ enum RedisResponseConstant {
   final String name;
 }
 
+// Pre-computed character codes for faster comparison
+class _CharCodes {
+  static const int plus = 43; // '+'
+  static const int minus = 45; // '-'
+  static const int dollar = 36; // '$'
+  static const int colon = 58; // ':'
+  static const int asterisk = 42; // '*'
+  static const int cr = 13; // '\r'
+  static const int lf = 10; // '\n'
+}
+
 enum RedisType {
   normal('normal'),
   subscriber('publisher'),
@@ -22,114 +33,183 @@ enum RedisType {
 }
 
 class RedisResponse {
+  // Cache for frequently used strings
+  static const String _crlf = '\r\n';
+  static const String _okResponse = 'OK';
+  static const String _plusOkResponse = '+OK';
+
+  @pragma('vm:prefer-inline')
   static bool ok(String? s) {
-    return s == 'OK' || s == '+OK';
+    return s == _okResponse || s == _plusOkResponse;
   }
 
+  @pragma('vm:prefer-inline')
   static bool isSimpleString(String s) {
-    return s.startsWith(RedisResponseConstant.simpleString.name);
+    return s.isNotEmpty && s.codeUnitAt(0) == _CharCodes.plus;
   }
 
+  @pragma('vm:prefer-inline')
+  static bool isError(String s) {
+    return s.isNotEmpty && s.codeUnitAt(0) == _CharCodes.minus;
+  }
+
+  @pragma('vm:prefer-inline')
+  static bool isBulkString(String s) {
+    return s.isNotEmpty && s.codeUnitAt(0) == _CharCodes.dollar;
+  }
+
+  @pragma('vm:prefer-inline')
+  static bool isInteger(String s) {
+    return s.isNotEmpty && s.codeUnitAt(0) == _CharCodes.colon;
+  }
+
+  @pragma('vm:prefer-inline')
+  static bool isArray(String s) {
+    return s.isNotEmpty && s.codeUnitAt(0) == _CharCodes.asterisk;
+  }
+
+  @pragma('vm:prefer-inline')
   static String? toSimpleString(String s) {
-    final val = s.substring(1).replaceFirst('\r\n', '');
-    if (val.isEmpty) return null;
-    return val;
+    if (s.length <= 1) return null;
+
+    // Find \r\n more efficiently
+    final crlfIndex = s.indexOf(_crlf, 1);
+    if (crlfIndex == -1) {
+      // No CRLF found, take everything after first character
+      final val = s.substring(1);
+      return val.isEmpty ? null : val;
+    }
+
+    final val = s.substring(1, crlfIndex);
+    return val.isEmpty ? null : val;
   }
 
   static String? toBulkString(String s) {
-    // Parse Redis bulk string format: $<length>\r\n<data>\r\n
-    if (!s.startsWith(r'$')) return null;
+    if (s.length < 4) return null; // Minimum: $0\r\n\r\n
 
-    final firstCrlfIndex = s.indexOf('\r\n');
-    if (firstCrlfIndex == -1) return null;
+    // Find first \r\n more efficiently
+    var crlfIndex = -1;
+    for (var i = 1; i < s.length - 1; i++) {
+      if (s.codeUnitAt(i) == _CharCodes.cr &&
+          s.codeUnitAt(i + 1) == _CharCodes.lf) {
+        crlfIndex = i;
+        break;
+      }
+    }
 
-    final lengthStr = s.substring(1, firstCrlfIndex);
+    if (crlfIndex == -1) return null;
+
+    final lengthStr = s.substring(1, crlfIndex);
     final length = int.tryParse(lengthStr);
-
     if (length == null) return null;
 
     // Check for null bulk string
     if (length == -1) return null;
 
-    // Extract the data part based on the specified byte length
-    final dataStartIndex = firstCrlfIndex + 2;
+    // Extract the data part more efficiently
+    final dataStartIndex = crlfIndex + 2;
+    if (dataStartIndex >= s.length) return null;
 
-    // Convert to bytes to handle proper length calculation for UTF-8
+    // For better UTF-8 handling, we need to work with bytes
     final bytes = utf8.encode(s);
-    final dataStartByteIndex =
-        utf8.encode(s.substring(0, dataStartIndex)).length;
-    final dataEndByteIndex = dataStartByteIndex + length;
+    final headerBytes = utf8.encode(s.substring(0, dataStartIndex));
+    final dataEndByteIndex = headerBytes.length + length;
 
     // Make sure we have enough bytes
     if (bytes.length < dataEndByteIndex) return null;
 
     // Extract the data bytes and decode back to string
-    final dataBytes = bytes.sublist(dataStartByteIndex, dataEndByteIndex);
+    final dataBytes = bytes.sublist(headerBytes.length, dataEndByteIndex);
     return utf8.decode(dataBytes);
   }
 
   static List<String?> toArrayString(String s) {
-    final listOfData = s.split('\r\n');
-    final elements = <String?>[];
+    if (s.length < 4) return []; // Minimum: *0\r\n
 
-    final count = int.parse(listOfData[0].substring(1));
-    var currentIndex = 0;
-    var i = 0;
-
-    var type = '';
-
-    while (currentIndex < count) {
-      i++;
-      final element = '$type${listOfData[i]}';
-      if (type.isEmpty && (isBulkString(element))) {
-        type = '$element\r\n';
-      } else if (type.isNotEmpty) {
-        elements.add(transform(element) as String?);
-        type = '';
-        currentIndex++;
-      } else {
-        elements.add(transform(element) as String?);
-        currentIndex++;
+    // Find first \r\n efficiently
+    var crlfIndex = -1;
+    for (var i = 1; i < s.length - 1; i++) {
+      if (s.codeUnitAt(i) == _CharCodes.cr &&
+          s.codeUnitAt(i + 1) == _CharCodes.lf) {
+        crlfIndex = i;
+        break;
       }
     }
+
+    if (crlfIndex == -1) return [];
+
+    final countStr = s.substring(1, crlfIndex);
+    final count = int.tryParse(countStr);
+    if (count == null || count <= 0) return [];
+
+    final elements = <String?>[];
+    var position = crlfIndex + 2;
+    var currentIndex = 0;
+    var pendingBulkString = '';
+
+    while (currentIndex < count && position < s.length) {
+      if (pendingBulkString.isNotEmpty) {
+        // We're in the middle of parsing a bulk string
+        final nextCrlfIndex = s.indexOf(_crlf, position);
+        if (nextCrlfIndex == -1) break;
+
+        final element =
+            pendingBulkString + s.substring(position, nextCrlfIndex + 2);
+        elements.add(transform(element) as String?);
+        pendingBulkString = '';
+        position = nextCrlfIndex + 2;
+        currentIndex++;
+      } else {
+        // Find the next element
+        final nextCrlfIndex = s.indexOf(_crlf, position);
+        if (nextCrlfIndex == -1) break;
+
+        final element = s.substring(position, nextCrlfIndex + 2);
+
+        if (element.isNotEmpty && element.codeUnitAt(0) == _CharCodes.dollar) {
+          // This is a bulk string, we need to get the next line too
+          pendingBulkString = element;
+          position = nextCrlfIndex + 2;
+        } else {
+          // This is a simple element
+          elements.add(transform(element) as String?);
+          position = nextCrlfIndex + 2;
+          currentIndex++;
+        }
+      }
+    }
+
     return elements;
   }
 
+  @pragma('vm:prefer-inline')
   String? toErrorString(String s) {
+    if (s.length <= 3) return null; // Minimum: -a\r\n
     return s.substring(1, s.length - 2);
-  }
-
-  static bool isError(String s) {
-    return s.startsWith(RedisResponseConstant.error.name);
-  }
-
-  static bool isBulkString(String s) {
-    return s.startsWith(RedisResponseConstant.bulkString.name);
-  }
-
-  static bool isInteger(String s) {
-    return s.startsWith(RedisResponseConstant.integer.name);
-  }
-
-  static bool isArray(String s) {
-    return s.startsWith(RedisResponseConstant.array.name);
   }
 
   static dynamic transform(String? s) {
     if (s == null || s.isEmpty) return null;
-    if (ok(s)) {
-      return 'OK';
-    } else if (isSimpleString(s)) {
-      return toSimpleString(s);
-    } else if (isError(s)) {
-      return toSimpleString(s);
-    } else if (isInteger(s)) {
-      return toSimpleString(s);
-    } else if (isBulkString(s)) {
-      return toBulkString(s);
-    } else if (isArray(s)) {
-      return toArrayString(s);
+
+    // Early return for OK responses
+    if (s == _okResponse || s == _plusOkResponse) return _okResponse;
+
+    // Use codeUnitAt for faster type checking
+    final firstChar = s.codeUnitAt(0);
+
+    switch (firstChar) {
+      case _CharCodes.plus:
+        return toSimpleString(s);
+      case _CharCodes.minus:
+        return toSimpleString(s);
+      case _CharCodes.colon:
+        return toSimpleString(s);
+      case _CharCodes.dollar:
+        return toBulkString(s);
+      case _CharCodes.asterisk:
+        return toArrayString(s);
+      default:
+        return null;
     }
-    return null;
   }
 }
