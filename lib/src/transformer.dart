@@ -132,74 +132,14 @@ class BufferedRedisResponseTransformer
   }
 
   (dynamic, String)? _parseArray() {
-    // For arrays, we need to parse the entire structure
-    // This is more complex, so we'll use the existing array parser
-    // but we need to ensure we have enough data
+    final parsed = RedisResponse.tryParseWithConsumed(_buffer);
+    if (parsed == null) return null;
 
-    final firstCrlfIndex = _buffer.indexOf(_crlf);
-    if (firstCrlfIndex == -1) return null; // Need more data
+    final (result, consumedChars) = parsed;
+    if (consumedChars <= 0 || consumedChars > _buffer.length) return null;
 
-    final countStr = _buffer.substring(1, firstCrlfIndex);
-    final count = int.tryParse(countStr);
-    if (count == null) return null;
-
-    if (count == 0) {
-      // Empty array
-      final responseStr = _buffer.substring(0, firstCrlfIndex + 2);
-      final remaining = _buffer.substring(firstCrlfIndex + 2);
-      final result = RedisResponse.transform(responseStr);
-      return (result, remaining);
-    }
-
-    // For non-empty arrays, we need to check if we have all elements
-    // This is a simplified approach - we'll try to parse and see if it works
-    var elementCount = 0;
-    var position = firstCrlfIndex + 2;
-    var minRequiredLength = position;
-
-    // Count expected elements to estimate if we have enough data
-    while (elementCount < count && position < _buffer.length) {
-      final nextCrlfIndex = _buffer.indexOf(_crlf, position);
-      if (nextCrlfIndex == -1) break;
-
-      final elementType = _buffer.codeUnitAt(position);
-      if (elementType == 36) {
-        // '$' Bulk string
-        // For bulk strings, we need to check the length
-        final lengthStr = _buffer.substring(position + 1, nextCrlfIndex);
-        final length = int.tryParse(lengthStr);
-        if (length == null) break;
-
-        if (length == -1) {
-          // Null bulk string
-          position = nextCrlfIndex + 2;
-          elementCount++;
-        } else {
-          // Need data + final \r\n
-          position = nextCrlfIndex + 2 + length + 2;
-          elementCount++;
-        }
-      } else {
-        // Simple element
-        position = nextCrlfIndex + 2;
-        elementCount++;
-      }
-
-      minRequiredLength = position;
-    }
-
-    // If we don't have enough elements or data, wait for more
-    if (elementCount < count || minRequiredLength > _buffer.length) {
-      return null;
-    }
-
-    // Try to parse the array
-    final result = RedisResponse.transform(_buffer);
-    if (result != null) {
-      return (result, '');
-    }
-
-    return null;
+    final remaining = _buffer.substring(consumedChars);
+    return (result, remaining);
   }
 }
 

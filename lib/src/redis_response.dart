@@ -123,72 +123,10 @@ class RedisResponse {
     return utf8.decode(dataBytes);
   }
 
-  static List<String?> toArrayString(String s) {
-    if (s.length < 4) return []; // Minimum: *0\r\n
-
-    // Find first \r\n efficiently
-    var crlfIndex = -1;
-    for (var i = 1; i < s.length - 1; i++) {
-      if (s.codeUnitAt(i) == _CharCodes.cr &&
-          s.codeUnitAt(i + 1) == _CharCodes.lf) {
-        crlfIndex = i;
-        break;
-      }
-    }
-
-    if (crlfIndex == -1) return [];
-
-    final countStr = s.substring(1, crlfIndex);
-    final count = int.tryParse(countStr);
-    if (count == null) return [];
-    if (count <= 0) return List<String?>.filled(count == 0 ? 0 : 0, null);
-
-    final elements = <String?>[];
-    var position = crlfIndex + 2;
-    var currentIndex = 0;
-
-    while (currentIndex < count && position < s.length) {
-      // Find the next element's end
-      final nextCrlfIndex = s.indexOf(_crlf, position);
-      if (nextCrlfIndex == -1) break;
-
-      final element = s.substring(position, nextCrlfIndex + 2);
-
-      if (element.isNotEmpty && element.codeUnitAt(0) == _CharCodes.dollar) {
-        // This is a bulk string
-        final lengthStr = element.substring(1, element.length - 2);
-        final length = int.tryParse(lengthStr);
-
-        if (length == null) break;
-
-        if (length == -1) {
-          // Null bulk string
-          elements.add(null);
-          position = nextCrlfIndex + 2;
-          currentIndex++;
-        } else {
-          // Non-null bulk string - need to get the actual data
-          final dataStartIndex = nextCrlfIndex + 2;
-          if (dataStartIndex >= s.length) break;
-
-          // Find the end of the data (another \r\n after the data)
-          final dataEndIndex = dataStartIndex + length;
-          if (dataEndIndex + 2 > s.length) break;
-
-          final data = s.substring(dataStartIndex, dataEndIndex);
-          elements.add(data);
-          position = dataEndIndex + 2; // Skip the final \r\n
-          currentIndex++;
-        }
-      } else {
-        // This is a simple element
-        elements.add(transform(element) as String?);
-        position = nextCrlfIndex + 2;
-        currentIndex++;
-      }
-    }
-
-    return elements;
+  static List<dynamic> toArrayString(String s) {
+    final parsed = tryParseWithConsumed(s);
+    if (parsed == null || parsed.$1 is! List<dynamic>) return <dynamic>[];
+    return parsed.$1 as List<dynamic>;
   }
 
   @pragma('vm:prefer-inline')
@@ -220,5 +158,107 @@ class RedisResponse {
       default:
         return null;
     }
+  }
+
+  /// Parse one RESP value from the beginning of [s].
+  /// Returns parsed value and consumed character length when complete.
+  /// Returns null when [s] does not yet contain a complete value.
+  static (dynamic, int)? tryParseWithConsumed(String s) {
+    return _parseWithConsumedAt(s, 0);
+  }
+
+  static (dynamic, int)? _parseWithConsumedAt(String s, int start) {
+    if (start >= s.length) return null;
+
+    final firstChar = s.codeUnitAt(start);
+
+    switch (firstChar) {
+      case _CharCodes.plus:
+      case _CharCodes.minus:
+      case _CharCodes.colon:
+        final lineEnd = s.indexOf(_crlf, start);
+        if (lineEnd == -1) return null;
+        final value = s.substring(start + 1, lineEnd);
+        return (value.isEmpty ? null : value, lineEnd + 2);
+
+      case _CharCodes.dollar:
+        final headerEnd = s.indexOf(_crlf, start);
+        if (headerEnd == -1) return null;
+
+        final len = int.tryParse(s.substring(start + 1, headerEnd));
+        if (len == null) return null;
+        if (len == -1) {
+          return (null, headerEnd + 2);
+        }
+
+        final dataStart = headerEnd + 2;
+        final dataEnd = _advanceByUtf8Bytes(s, dataStart, len);
+        if (dataEnd == null) return null;
+        if (dataEnd + 2 > s.length) return null;
+        if (s.codeUnitAt(dataEnd) != _CharCodes.cr ||
+            s.codeUnitAt(dataEnd + 1) != _CharCodes.lf) {
+          return null;
+        }
+
+        final data = s.substring(dataStart, dataEnd);
+        return (data, dataEnd + 2);
+
+      case _CharCodes.asterisk:
+        final headerEnd = s.indexOf(_crlf, start);
+        if (headerEnd == -1) return null;
+
+        final count = int.tryParse(s.substring(start + 1, headerEnd));
+        if (count == null) return null;
+        if (count == -1) return (null, headerEnd + 2);
+        if (count == 0) return (<dynamic>[], headerEnd + 2);
+
+        var position = headerEnd + 2;
+        final values = <dynamic>[];
+        for (var i = 0; i < count; i++) {
+          final parsed = _parseWithConsumedAt(s, position);
+          if (parsed == null) return null;
+          values.add(parsed.$1);
+          position = parsed.$2;
+        }
+        return (values, position);
+
+      default:
+        return null;
+    }
+  }
+
+  /// Advance [start] by [utf8Bytes] bytes in UTF-8 terms.
+  /// Returns the resulting character index when exact, otherwise null.
+  static int? _advanceByUtf8Bytes(String s, int start, int utf8Bytes) {
+    var index = start;
+    var consumed = 0;
+
+    while (index < s.length && consumed < utf8Bytes) {
+      final unit = s.codeUnitAt(index);
+      int width;
+
+      if (unit <= 0x7F) {
+        width = 1;
+      } else if (unit <= 0x7FF) {
+        width = 2;
+      } else if (unit >= 0xD800 && unit <= 0xDBFF) {
+        if (index + 1 >= s.length) return null;
+        final low = s.codeUnitAt(index + 1);
+        if (low < 0xDC00 || low > 0xDFFF) return null;
+        width = 4;
+        index += 1;
+      } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+        return null;
+      } else {
+        width = 3;
+      }
+
+      if (consumed + width > utf8Bytes) return null;
+      consumed += width;
+      index += 1;
+    }
+
+    if (consumed != utf8Bytes) return null;
+    return index;
   }
 }
