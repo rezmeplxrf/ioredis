@@ -169,7 +169,7 @@ class Redis {
 
   /// send command to connection
   Future<dynamic> sendCommand(List<String> commandList) async {
-    if (connection.isBusy == false || redisClientType != RedisType.normal) {
+    if (!connection.isBusy || redisClientType != RedisType.normal) {
       return connection.sendCommand(commandList);
     }
     return pool.sendCommand(commandList);
@@ -201,7 +201,7 @@ class Redis {
   /// setting keys prefix before setting or getting values
   List<String> _setPrefixInKeys(List<String> keys) {
     return keys
-        .map((String k) =>
+        .map((k) =>
             option.keyPrefix.isNotEmpty ? '${option.keyPrefix}:$k' : k)
         .toList();
   }
@@ -236,5 +236,30 @@ class Redis {
     if (!RedisResponse.ok(val)) {
       throw Exception(val);
     }
+  }
+
+  /// Evaluate a Lua script atomically on Redis.
+  ///
+  /// ```dart
+  /// final result = await redis.eval(
+  ///   'return {KEYS[1],ARGV[1]}',
+  ///   keys: ['k1'],
+  ///   args: ['v1'],
+  /// );
+  /// ```
+  Future<dynamic> eval(
+    String script, {
+    List<String> keys = const <String>[],
+    List<dynamic> args = const <dynamic>[],
+  }) async {
+    final prefixedKeys = _setPrefixInKeys(keys);
+    final command = <String>[
+      'EVAL',
+      script,
+      prefixedKeys.length.toString(),
+      ...prefixedKeys,
+      ...args.map((arg) => arg.toString()),
+    ];
+    return sendCommand(command);
   }
 }

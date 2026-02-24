@@ -1,4 +1,4 @@
-include: package:very_good_analysis/analysis_options.6.0.0.yaml
+include: package:very_good_analysis/analysis_options.yaml
 analyzer:
   exclude:
     - build/**
@@ -6,10 +6,12 @@ analyzer:
     - "**.g.dart"
     # - test/**
   errors:
+    avoid_catches_without_on_clauses: ignore
     avoid_dynamic_calls: ignore
     avoid_returning_this: ignore
     avoid_setters_without_getters: ignore
     cascade_invocations: ignore
+    document_ignores: ignore
     eol_at_end_of_file: ignore
     inference_failure_on_function_invocation: ignore
     invalid_annotation_target: ignore

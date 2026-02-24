@@ -5,6 +5,10 @@ import 'dart:io';
 import 'package:ioredis/ioredis.dart';
 import 'package:test/test.dart';
 
+// docker run -d --name redis -p 6379:6379 redis:8.6.1-alpine
+
+
+
 void main() {
   group('Redis |', () {
     late final Redis redis;
@@ -89,13 +93,13 @@ void main() {
       final sub = Redis(commonOptions);
 
       final subscriber1 = await sub.subscribe('chat1');
-      subscriber1.onMessage = (String channel, String? message) {
+      subscriber1.onMessage = (channel, message) {
         print(channel);
         print(message);
       };
 
       final subscriber2 = await sub.subscribe('chat2');
-      subscriber2.onMessage = (String channel, String? message) {
+      subscriber2.onMessage = (channel, message) {
         print(channel);
         print(message);
       };

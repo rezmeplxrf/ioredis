@@ -6,13 +6,13 @@ import 'package:ioredis/src/redis_response.dart';
 
 StreamTransformer<Uint8List, String> transformer =
     StreamTransformer<Uint8List, String>.fromHandlers(
-  handleData: (List<int> data, EventSink<String> sink) {
+  handleData: (data, sink) {
     sink.add(utf8.decode(data));
   },
-  handleError: (Object err, StackTrace st, EventSink<String> sink) {
+  handleError: (err, st, sink) {
     sink.addError(err);
   },
-  handleDone: (EventSink<String> sink) {
+  handleDone: (sink) {
     sink.close();
   },
 );
@@ -26,7 +26,7 @@ class BufferedRedisResponseTransformer
   Stream<dynamic> bind(Stream<String> stream) {
     return stream.transform(
       StreamTransformer<String, dynamic>.fromHandlers(
-        handleData: (String data, EventSink<dynamic> sink) {
+        handleData: (data, sink) {
           _buffer += data;
 
           // Try to parse complete responses from the buffer
@@ -41,10 +41,10 @@ class BufferedRedisResponseTransformer
             }
           }
         },
-        handleError: (Object err, StackTrace st, EventSink<dynamic> sink) {
+        handleError: (err, st, sink) {
           sink.addError(err);
         },
-        handleDone: (EventSink<dynamic> sink) {
+        handleDone: (sink) {
           _buffer = '';
           sink.close();
         },

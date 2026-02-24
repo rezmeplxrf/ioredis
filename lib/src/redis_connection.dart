@@ -68,7 +68,7 @@ class RedisConnection {
 
       /// Create new socket if not exist
       if (_redisSocket == null) {
-        if (option.secure == true) {
+        if (option.secure) {
           _redisSocket = await SecureSocket.connect(option.host, option.port,
               timeout: option.connectTimeout);
         } else {
