@@ -118,6 +118,11 @@ class RedisConnectionPool {
   void _destroyAndRemove(int connId) {
     final connection = _poolConnections[connId];
     if (connection != null) {
+      if (connection.isBusy ||
+          connection.status == RedisConnectionStatus.connecting) {
+        _resetTimer(connId);
+        return;
+      }
       connection.destroy();
       _poolConnections.remove(connId);
     }

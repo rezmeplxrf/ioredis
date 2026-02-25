@@ -32,13 +32,11 @@ class _PendingCommand {
 
 class RedisConnection {
   RedisConnection([RedisOptions? opt]) {
-    if (opt != null) {
-      option = opt;
-    }
+    option = (opt ?? defaultRedisOptions()).clone();
   }
 
   /// Redis option
-  RedisOptions option = defaultRedisOptions;
+  late RedisOptions option;
 
   /// Current status of redis connection
   RedisConnectionStatus status = RedisConnectionStatus.disconnected;

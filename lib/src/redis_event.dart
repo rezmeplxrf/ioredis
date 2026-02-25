@@ -24,9 +24,4 @@ enum RedisEventType {
   commandSuccess,
   commandRetry,
   commandError,
-  redirectMoved,
-  redirectAsk,
-  sentinelResolveStart,
-  sentinelResolveSuccess,
-  sentinelResolveFailure,
 }

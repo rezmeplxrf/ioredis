@@ -10,49 +10,18 @@ import 'package:ioredis/src/redis_connection_pool.dart';
 import 'package:ioredis/src/redis_multi_command.dart';
 import 'package:ioredis/src/redis_response.dart';
 
-class RedisClusterDiagnostics {
-  const RedisClusterDiagnostics({
-    required this.enabled,
-    required this.knownNodeEndpoints,
-    required this.knownSlotCount,
-    required this.lastRefreshedAt,
-  });
-
-  final bool enabled;
-  final List<String> knownNodeEndpoints;
-  final int knownSlotCount;
-  final DateTime? lastRefreshedAt;
-}
-
-class _ClusterRoutingPlan {
-  const _ClusterRoutingPlan({
-    required this.keys,
-    required this.requiresSingleSlot,
-  });
-
-  final List<String> keys;
-  final bool requiresSingleSlot;
-}
-
 class Redis {
   Redis([RedisOptions? opt]) {
-    if (opt != null) {
-      option = opt;
-    }
+    option = (opt ?? defaultRedisOptions()).clone();
     connection = RedisConnection(option);
     connection.onReconnect = _resubscribeActiveListeners;
     pool = RedisConnectionPool(option, connection);
   }
   late RedisConnection connection;
 
-  late RedisOptions option = defaultRedisOptions;
+  late RedisOptions option;
 
   late RedisConnectionPool pool;
-  final Map<String, RedisConnection> _clusterConnections =
-      <String, RedisConnection>{};
-  final Map<int, String> _clusterSlotToEndpoint = <int, String>{};
-  DateTime? _clusterSlotsLastRefreshAt;
-  DateTime? _sentinelLastResolveAt;
 
   /// Redis client type
   /// subscriber, publisher or normal set and get
@@ -69,7 +38,6 @@ class Redis {
   /// This call can be optional. If it function did not invoke initially,
   /// it will get call on first redis command.
   Future<void> connect() async {
-    await _ensureSentinelReady();
     await connection.connect();
   }
 
@@ -77,19 +45,12 @@ class Redis {
   Future<void> disconnect() async {
     pool.dispose();
     await connection.disconnect();
-    for (final clusterConnection in _clusterConnections.values) {
-      await clusterConnection.disconnect();
-    }
-    _clusterConnections.clear();
-    _clusterSlotToEndpoint.clear();
-    _clusterSlotsLastRefreshAt = null;
-    _sentinelLastResolveAt = null;
     redisClientType = RedisType.normal;
   }
 
   /// Duplicate new redis connection
   Redis duplicate() {
-    return Redis(option);
+    return Redis(option.clone());
   }
 
   /// Set key value to redis
@@ -546,21 +507,12 @@ class Redis {
     Duration? timeout,
     RedisRetryPolicy? retryPolicy,
   }) async {
-    await _ensureSentinelReady();
     final policy = retryPolicy ?? option.retryPolicy;
     var attempt = 1;
-    var redirects = 0;
     final sw = Stopwatch()..start();
 
     while (true) {
       try {
-        final routed = await _sendClusterRoutedCommandIfPossible(
-          commandList,
-          timeout: timeout,
-        );
-        if (routed != null) {
-          return routed;
-        }
         if (!connection.isBusy || redisClientType != RedisType.normal) {
           final result =
               await connection.sendCommand(commandList, timeout: timeout);
@@ -580,57 +532,6 @@ class Redis {
         return result;
       } catch (error) {
         final mapped = RedisErrorMapper.map(error, command: commandList);
-        if (option.enableClusterMode &&
-            (mapped is RedisMovedError || mapped is RedisAskError)) {
-          if (redirects >= option.maxClusterRedirects) {
-            throw mapped;
-          }
-          redirects++;
-          final endpoint = mapped is RedisMovedError
-              ? '${mapped.host}:${mapped.port}'
-              : () {
-                  final ask = mapped as RedisAskError;
-                  return '${ask.host}:${ask.port}';
-                }();
-          _emitEvent(RedisEvent(
-            type: mapped is RedisMovedError
-                ? RedisEventType.redirectMoved
-                : RedisEventType.redirectAsk,
-            command: commandList,
-            endpoint: endpoint,
-            attempt: redirects,
-            error: mapped,
-          ));
-          if (mapped is RedisMovedError) {
-            _clusterSlotToEndpoint[mapped.slot] =
-                '${mapped.host}:${mapped.port}';
-            unawaited(refreshClusterSlots(timeout: timeout));
-          }
-          final result = await _sendRedirectedCommand(
-            commandList,
-            mapped,
-            timeout: timeout,
-          );
-          _emitEvent(RedisEvent(
-            type: RedisEventType.commandSuccess,
-            command: commandList,
-            duration: sw.elapsed,
-          ));
-          return result;
-        }
-        if (option.enableSentinelMode &&
-            mapped is RedisCommandError &&
-            mapped.code == 'READONLY') {
-          await refreshSentinelMaster(timeout: timeout);
-          _emitEvent(RedisEvent(
-            type: RedisEventType.commandRetry,
-            command: commandList,
-            attempt: attempt,
-            error: mapped,
-          ));
-          attempt++;
-          continue;
-        }
         if (policy == null || !policy.canRetry(mapped, attempt, commandList)) {
           _emitEvent(RedisEvent(
             type: RedisEventType.commandError,
@@ -658,22 +559,13 @@ class Redis {
     Duration? timeout,
     RedisRetryPolicy? retryPolicy,
   }) async {
-    await _ensureSentinelReady();
     final policy = retryPolicy ?? option.retryPolicy;
     final commandForError = _commandSnapshot(commandList);
     var attempt = 1;
-    var redirects = 0;
     final sw = Stopwatch()..start();
 
     while (true) {
       try {
-        final routed = await _sendClusterRoutedBufferCommandIfPossible(
-          commandList,
-          timeout: timeout,
-        );
-        if (routed != null) {
-          return routed;
-        }
         final result =
             await connection.sendBufferCommand(commandList, timeout: timeout);
         _emitEvent(RedisEvent(
@@ -684,57 +576,6 @@ class Redis {
         return result;
       } catch (error) {
         final mapped = RedisErrorMapper.map(error, command: commandForError);
-        if (option.enableClusterMode &&
-            (mapped is RedisMovedError || mapped is RedisAskError)) {
-          if (redirects >= option.maxClusterRedirects) {
-            throw mapped;
-          }
-          redirects++;
-          final endpoint = mapped is RedisMovedError
-              ? '${mapped.host}:${mapped.port}'
-              : () {
-                  final ask = mapped as RedisAskError;
-                  return '${ask.host}:${ask.port}';
-                }();
-          _emitEvent(RedisEvent(
-            type: mapped is RedisMovedError
-                ? RedisEventType.redirectMoved
-                : RedisEventType.redirectAsk,
-            command: commandForError,
-            endpoint: endpoint,
-            attempt: redirects,
-            error: mapped,
-          ));
-          if (mapped is RedisMovedError) {
-            _clusterSlotToEndpoint[mapped.slot] =
-                '${mapped.host}:${mapped.port}';
-            unawaited(refreshClusterSlots(timeout: timeout));
-          }
-          final result = await _sendRedirectedBufferCommand(
-            commandList,
-            mapped,
-            timeout: timeout,
-          );
-          _emitEvent(RedisEvent(
-            type: RedisEventType.commandSuccess,
-            command: commandForError,
-            duration: sw.elapsed,
-          ));
-          return result;
-        }
-        if (option.enableSentinelMode &&
-            mapped is RedisCommandError &&
-            mapped.code == 'READONLY') {
-          await refreshSentinelMaster(timeout: timeout);
-          _emitEvent(RedisEvent(
-            type: RedisEventType.commandRetry,
-            command: commandForError,
-            attempt: attempt,
-            error: mapped,
-          ));
-          attempt++;
-          continue;
-        }
         if (policy == null ||
             !policy.canRetry(mapped, attempt, commandForError)) {
           _emitEvent(RedisEvent(
@@ -940,491 +781,11 @@ class Redis {
         .toList(growable: false);
   }
 
-  Future<dynamic> _sendRedirectedCommand(
-    List<String> commandList,
-    RedisError redirect, {
-    Duration? timeout,
-  }) async {
-    final redirectConnection = _clusterConnectionForRedirect(redirect);
-    if (redirect is RedisAskError) {
-      await redirectConnection
-          .sendCommand(<String>['ASKING'], timeout: timeout);
-    }
-    return redirectConnection.sendCommand(commandList, timeout: timeout);
-  }
-
-  Future<dynamic> _sendRedirectedBufferCommand(
-    List<Object?> commandList,
-    RedisError redirect, {
-    Duration? timeout,
-  }) async {
-    final redirectConnection = _clusterConnectionForRedirect(redirect);
-    if (redirect is RedisAskError) {
-      await redirectConnection
-          .sendCommand(<String>['ASKING'], timeout: timeout);
-    }
-    return redirectConnection.sendBufferCommand(commandList, timeout: timeout);
-  }
-
-  RedisConnection _clusterConnectionForRedirect(RedisError redirect) {
-    final host = switch (redirect) {
-      final RedisMovedError moved => moved.host,
-      final RedisAskError ask => ask.host,
-      _ => throw ArgumentError('Redirect error expected'),
-    };
-    final port = switch (redirect) {
-      final RedisMovedError moved => moved.port,
-      final RedisAskError ask => ask.port,
-      _ => throw ArgumentError('Redirect error expected'),
-    };
-    final endpoint = '$host:$port';
-    return _clusterConnectionForEndpoint(endpoint);
-  }
-
-  /// Refresh cluster slot cache from `CLUSTER SLOTS`.
-  Future<void> refreshClusterSlots({Duration? timeout}) async {
-    if (!option.enableClusterMode) return;
-
-    dynamic result;
-    try {
-      result = await connection.sendCommand(
-        <String>['CLUSTER', 'SLOTS'],
-        timeout: timeout,
-      );
-    } catch (_) {
-      if (_clusterConnections.isEmpty) return;
-      for (final clusterConnection in _clusterConnections.values) {
-        try {
-          result = await clusterConnection.sendCommand(
-            <String>['CLUSTER', 'SLOTS'],
-            timeout: timeout,
-          );
-          break;
-        } catch (_) {}
-      }
-      if (result == null) return;
-    }
-
-    final parsed = _parseClusterSlots(result);
-    if (parsed.isEmpty) return;
-    _clusterSlotToEndpoint
-      ..clear()
-      ..addAll(parsed);
-    _clusterSlotsLastRefreshAt = DateTime.now();
-  }
-
-  /// Resolve current master from Sentinel and update active connection target.
-  Future<bool> refreshSentinelMaster({Duration? timeout}) async {
-    if (!option.enableSentinelMode) return false;
-    final masterName = option.sentinelMasterName;
-    if (masterName == null || masterName.isEmpty || option.sentinels.isEmpty) {
-      throw RedisProtocolError(
-        'Sentinel mode requires sentinelMasterName and sentinels',
-      );
-    }
-
-    _emitEvent(RedisEvent(
-      type: RedisEventType.sentinelResolveStart,
-      endpoint: _currentEndpoint(),
-    ));
-
-    Object? lastError;
-    for (final sentinel in option.sentinels) {
-      RedisConnection? sentinelConnection;
-      try {
-        final sentinelOptions = RedisOptions(
-          host: sentinel.host,
-          port: sentinel.port,
-          secure: option.secure,
-          connectTimeout: option.connectTimeout,
-          commandTimeout: timeout ?? option.commandTimeout,
-          username: option.username,
-          password: option.password,
-          retryStrategy: option.retryStrategy,
-          onError: option.onError,
-          maxConnection: 1,
-          idleTimeout: option.idleTimeout,
-          protocolVersion: option.protocolVersion,
-          maxClusterRedirects: option.maxClusterRedirects,
-          onEvent: option.onEvent,
-          pipelineBatchSize: option.pipelineBatchSize,
-          maxPendingCommands: option.maxPendingCommands,
-        );
-        sentinelConnection = RedisConnection(sentinelOptions);
-        final result = await sentinelConnection.sendCommand(<String>[
-          'SENTINEL',
-          'get-master-addr-by-name',
-          masterName,
-        ], timeout: timeout);
-
-        if (result is List && result.length >= 2) {
-          final host = result[0];
-          final portRaw = result[1];
-          final port = int.tryParse(portRaw.toString());
-          if (host is String && host.isNotEmpty && port != null) {
-            final oldEndpoint = _currentEndpoint();
-            option.host = host;
-            option.port = port;
-            _sentinelLastResolveAt = DateTime.now();
-            if (oldEndpoint != _currentEndpoint()) {
-              await connection.reconnect(force: true);
-            }
-            _emitEvent(RedisEvent(
-              type: RedisEventType.sentinelResolveSuccess,
-              endpoint: _currentEndpoint(),
-            ));
-            return true;
-          }
-        }
-      } catch (error) {
-        lastError = error;
-      } finally {
-        if (sentinelConnection != null) {
-          await sentinelConnection.disconnect();
-        }
-      }
-    }
-
-    _emitEvent(RedisEvent(
-      type: RedisEventType.sentinelResolveFailure,
-      endpoint: _currentEndpoint(),
-      error: lastError,
-    ));
-    if (lastError != null) {
-      throw RedisErrorMapper.map(lastError);
-    }
-    return false;
-  }
-
-  RedisClusterDiagnostics clusterDiagnostics() {
-    final endpoints = _clusterConnections.keys.toList()..sort();
-    return RedisClusterDiagnostics(
-      enabled: option.enableClusterMode,
-      knownNodeEndpoints: endpoints,
-      knownSlotCount: _clusterSlotToEndpoint.length,
-      lastRefreshedAt: _clusterSlotsLastRefreshAt,
-    );
-  }
-
-  DateTime? sentinelLastResolvedAt() => _sentinelLastResolveAt;
-
-  /// Warm cluster topology cache by loading slot map.
-  /// Returns true if slots are available after refresh.
-  Future<bool> warmClusterSlots({Duration? timeout}) async {
-    await refreshClusterSlots(timeout: timeout);
-    return _clusterSlotToEndpoint.isNotEmpty;
-  }
-
-  Future<dynamic> _sendClusterRoutedCommandIfPossible(
-    List<String> commandList, {
-    Duration? timeout,
-  }) async {
-    if (!option.enableClusterMode) {
-      return null;
-    }
-    final plan = _routingPlanFromCommand(commandList);
-    if (plan == null || plan.keys.isEmpty) return null;
-    _enforceSingleSlotIfNeeded(plan);
-    if (_clusterSlotToEndpoint.isEmpty) {
-      await refreshClusterSlots(timeout: timeout);
-    }
-    final slot = keySlot(plan.keys.first);
-    final endpoint = _clusterSlotToEndpoint[slot];
-    if (endpoint == null) return null;
-    return _clusterConnectionForEndpoint(endpoint).sendCommand(
-      commandList,
-      timeout: timeout,
-    );
-  }
-
-  Future<dynamic> _sendClusterRoutedBufferCommandIfPossible(
-    List<Object?> commandList, {
-    Duration? timeout,
-  }) async {
-    if (!option.enableClusterMode) {
-      return null;
-    }
-    final plan = _routingPlanFromBufferCommand(commandList);
-    if (plan == null || plan.keys.isEmpty) return null;
-    _enforceSingleSlotIfNeeded(plan);
-    if (_clusterSlotToEndpoint.isEmpty) {
-      await refreshClusterSlots(timeout: timeout);
-    }
-    final slot = keySlot(plan.keys.first);
-    final endpoint = _clusterSlotToEndpoint[slot];
-    if (endpoint == null) return null;
-    return _clusterConnectionForEndpoint(endpoint).sendBufferCommand(
-      commandList,
-      timeout: timeout,
-    );
-  }
-
-  RedisConnection _clusterConnectionForEndpoint(String endpoint) {
-    final existing = _clusterConnections[endpoint];
-    if (existing != null) {
-      return existing;
-    }
-    final separatorIndex = endpoint.lastIndexOf(':');
-    if (separatorIndex <= 0 || separatorIndex == endpoint.length - 1) {
-      throw ArgumentError('Invalid endpoint: $endpoint');
-    }
-    final host = endpoint.substring(0, separatorIndex);
-    final port = int.parse(endpoint.substring(separatorIndex + 1));
-    final options = RedisOptions(
-      keyPrefix: option.keyPrefix,
-      host: host,
-      port: port,
-      secure: option.secure,
-      connectTimeout: option.connectTimeout,
-      commandTimeout: option.commandTimeout,
-      username: option.username,
-      password: option.password,
-      db: option.db,
-      retryStrategy: option.retryStrategy,
-      retryPolicy: option.retryPolicy,
-      onError: option.onError,
-      maxConnection: option.maxConnection,
-      idleTimeout: option.idleTimeout,
-      protocolVersion: option.protocolVersion,
-      enableClusterMode: option.enableClusterMode,
-      maxClusterRedirects: option.maxClusterRedirects,
-      onEvent: option.onEvent,
-      pipelineBatchSize: option.pipelineBatchSize,
-      maxPendingCommands: option.maxPendingCommands,
-    );
-    final created = RedisConnection(options);
-    _clusterConnections[endpoint] = created;
-    return created;
-  }
-
-  Map<int, String> _parseClusterSlots(dynamic result) {
-    if (result is! List) return const <int, String>{};
-    final slots = <int, String>{};
-    for (final entry in result) {
-      if (entry is! List || entry.length < 3) continue;
-      final start = entry[0];
-      final end = entry[1];
-      final primary = entry[2];
-      if (start is! int || end is! int) continue;
-      if (primary is! List || primary.length < 2) continue;
-      final host = primary[0];
-      final port = primary[1];
-      if (host is! String || port is! int) continue;
-      final endpoint = '$host:$port';
-      for (var slot = start; slot <= end; slot++) {
-        slots[slot] = endpoint;
-      }
-    }
-    return slots;
-  }
-
-  static const Set<String> _singleKeyCommands = <String>{
-    'GET',
-    'SET',
-    'DEL',
-    'EXISTS',
-    'HGET',
-    'HSET',
-    'HMGET',
-    'LPUSH',
-    'RPUSH',
-    'LRANGE',
-    'SADD',
-    'SMEMBERS',
-    'ZADD',
-    'ZRANGE',
-    'JSON.GET',
-    'JSON.SET',
-    'XADD',
-    'XRANGE',
-    'XREVRANGE',
-    'XLEN',
-    'XTRIM',
-    'XDEL',
-    'XACK',
-    'XPENDING',
-    'XAUTOCLAIM',
-    'XCLAIM',
-    'GETDEL',
-    'GETEX',
-    'GETSET',
-    'INCR',
-    'INCRBY',
-    'DECR',
-    'DECRBY',
-    'APPEND',
-    'STRLEN',
-    'LLEN',
-    'LPOP',
-    'RPOP',
-    'SPOP',
-    'SCARD',
-    'SISMEMBER',
-    'ZCARD',
-    'ZSCORE',
-    'ZRANK',
-    'ZREVRANK',
-    'HDEL',
-    'HLEN',
-    'HEXISTS',
-    'HGETALL',
-    'HKEYS',
-    'HVALS',
-    'HINCRBY',
-    'HINCRBYFLOAT',
-    'EXPIRE',
-    'PEXPIRE',
-    'TTL',
-    'PTTL',
-    'PERSIST',
-    'TYPE',
-    'UNLINK',
-    'DUMP',
-    'RESTORE',
-    'RENAMENX',
-    'PFADD',
-    'PFMERGE',
-    'SSCAN',
-    'HSCAN',
-    'ZSCAN',
-  };
-
-  static const Set<String> _singleKeyCommandsKeyAt2 = <String>{
-    'OBJECT',
-    'XGROUP',
-    'XINFO',
-  };
-
-  static const Set<String> _multiKeyCommandsSingleSlot = <String>{
-    'MGET',
-    'DEL',
-    'EXISTS',
-    'MSET',
-    'MSETNX',
-  };
-
-  _ClusterRoutingPlan? _routingPlanFromCommand(List<String> commandList) {
-    if (commandList.length < 2) return null;
-    final command = commandList.first.toUpperCase();
-    if (command == 'EVAL' ||
-        command == 'EVALSHA' ||
-        command == 'EVAL_RO' ||
-        command == 'EVALSHA_RO') {
-      if (commandList.length < 4) return null;
-      final keyCount = int.tryParse(commandList[2]) ?? 0;
-      if (keyCount <= 0) {
-        return const _ClusterRoutingPlan(
-          keys: <String>[],
-          requiresSingleSlot: false,
-        );
-      }
-      final end = 3 + keyCount;
-      if (commandList.length < end) return null;
-      return _ClusterRoutingPlan(
-        keys: commandList.sublist(3, end),
-        requiresSingleSlot: true,
-      );
-    }
-    if (_singleKeyCommands.contains(command)) {
-      return _ClusterRoutingPlan(
-        keys: <String>[commandList[1]],
-        requiresSingleSlot: true,
-      );
-    }
-    if (_singleKeyCommandsKeyAt2.contains(command)) {
-      if (commandList.length < 3) return null;
-      return _ClusterRoutingPlan(
-        keys: <String>[commandList[2]],
-        requiresSingleSlot: true,
-      );
-    }
-    if (_multiKeyCommandsSingleSlot.contains(command)) {
-      if (command == 'MSET' || command == 'MSETNX') {
-        final keys = <String>[];
-        for (var i = 1; i < commandList.length; i += 2) {
-          keys.add(commandList[i]);
-        }
-        return _ClusterRoutingPlan(keys: keys, requiresSingleSlot: true);
-      }
-      return _ClusterRoutingPlan(
-        keys: commandList.sublist(1),
-        requiresSingleSlot: true,
-      );
-    }
-    return null;
-  }
-
-  _ClusterRoutingPlan? _routingPlanFromBufferCommand(
-      List<Object?> commandList) {
-    if (commandList.length < 2) return null;
-    final command = commandList.first;
-    if (command is! String) return null;
-    final routeCommand = command.toUpperCase();
-    if (!_singleKeyCommands.contains(routeCommand)) return null;
-    final key = commandList[1];
-    if (key is! String) return null;
-    return _ClusterRoutingPlan(
-      keys: <String>[key],
-      requiresSingleSlot: true,
-    );
-  }
-
-  void _enforceSingleSlotIfNeeded(_ClusterRoutingPlan plan) {
-    if (!plan.requiresSingleSlot || plan.keys.length < 2) return;
-    final expectedSlot = keySlot(plan.keys.first);
-    for (final key in plan.keys.skip(1)) {
-      if (keySlot(key) != expectedSlot) {
-        throw RedisProtocolError(
-          'CROSSSLOT Keys in request do not hash to the same slot',
-        );
-      }
-    }
-  }
-
-  Future<void> _ensureSentinelReady() async {
-    if (!option.enableSentinelMode) return;
-    if (connection.status == RedisConnectionStatus.connected) return;
-    await refreshSentinelMaster();
-  }
-
-  String _currentEndpoint() => '${option.host}:${option.port}';
-
   void _emitEvent(RedisEvent event) {
     final cb = option.onEvent;
     if (cb != null) {
       cb(event);
     }
-  }
-
-  /// Redis cluster hash slot for a key, honoring hashtag routing (`{...}`).
-  int keySlot(String key) {
-    final tag = _extractHashTag(key);
-    final bytes = utf8.encode(tag ?? key);
-    final crc = _crc16(bytes);
-    return crc % 16384;
-  }
-
-  String? _extractHashTag(String key) {
-    final start = key.indexOf('{');
-    if (start == -1 || start == key.length - 1) return null;
-    final end = key.indexOf('}', start + 1);
-    if (end == -1 || end == start + 1) return null;
-    return key.substring(start + 1, end);
-  }
-
-  int _crc16(List<int> data) {
-    var crc = 0;
-    for (final byte in data) {
-      crc ^= (byte & 0xFF) << 8;
-      for (var i = 0; i < 8; i++) {
-        if ((crc & 0x8000) != 0) {
-          crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
-        } else {
-          crc = (crc << 1) & 0xFFFF;
-        }
-      }
-    }
-    return crc & 0xFFFF;
   }
 
   int _toInt(dynamic value, {required String command}) {

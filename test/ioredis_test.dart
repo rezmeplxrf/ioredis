@@ -104,23 +104,6 @@ void main() {
       expect(data1, data2);
     });
 
-    test('cluster key slot uses hash tags', () async {
-      final slotA = redis.keySlot('user:{42}:profile');
-      final slotB = redis.keySlot('orders:{42}:recent');
-      final slotC = redis.keySlot('orders:{43}:recent');
-
-      expect(slotA, equals(slotB));
-      expect(slotA, isNot(equals(slotC)));
-      expect(slotA, inInclusiveRange(0, 16383));
-    });
-
-    test('cluster diagnostics exposes cache state', () {
-      final diagnostics = redis.clusterDiagnostics();
-      expect(diagnostics.enabled, equals(commonOptions.enableClusterMode));
-      expect(diagnostics.knownSlotCount, greaterThanOrEqualTo(0));
-      expect(diagnostics.knownNodeEndpoints, isA<List<String>>());
-    });
-
     test('command events are emitted via onEvent', () async {
       final events = <RedisEvent>[];
       final observed = Redis(RedisOptions(
@@ -141,70 +124,6 @@ void main() {
         events.any((e) => e.type == RedisEventType.commandSuccess),
         isTrue,
       );
-    });
-
-    test('sentinel refresh validates required configuration', () async {
-      final sentinel = Redis(RedisOptions(
-        host: commonOptions.host,
-        port: commonOptions.port,
-        password: commonOptions.password,
-        db: commonOptions.db,
-        enableSentinelMode: true,
-      ));
-      addTearDown(() async {
-        await sentinel.disconnect();
-      });
-
-      await expectLater(
-        sentinel.refreshSentinelMaster(),
-        throwsA(isA<RedisProtocolError>()),
-      );
-    });
-
-    test('warmClusterSlots is safe when cluster mode disabled', () async {
-      final nonCluster = Redis(RedisOptions(
-        host: commonOptions.host,
-        port: commonOptions.port,
-        password: commonOptions.password,
-        db: commonOptions.db,
-      ));
-      addTearDown(() async {
-        await nonCluster.disconnect();
-      });
-
-      final warmed = await nonCluster.warmClusterSlots();
-      expect(warmed, isFalse);
-      final diagnostics = nonCluster.clusterDiagnostics();
-      expect(diagnostics.knownSlotCount, equals(0));
-      expect(diagnostics.lastRefreshedAt, isNull);
-    });
-
-    test('cluster mode enforces same-slot for multi-key commands', () async {
-      final clusterLike = Redis(RedisOptions(
-        host: commonOptions.host,
-        port: commonOptions.port,
-        password: commonOptions.password,
-        db: commonOptions.db,
-        enableClusterMode: true,
-      ));
-      addTearDown(() async {
-        await clusterLike.disconnect();
-      });
-
-      await expectLater(
-        clusterLike.sendCommand(<String>[
-          'MGET',
-          'user:{1}:a',
-          'user:{2}:b',
-        ]),
-        throwsA(isA<RedisProtocolError>()),
-      );
-
-      await clusterLike.set('user:{42}:a', 'x');
-      await clusterLike.set('user:{42}:b', 'y');
-      final values =
-          await clusterLike.mget(<String>['user:{42}:a', 'user:{42}:b']);
-      expect(values, equals(<String?>['x', 'y']));
     });
 
     test('protocolVersion 3 connection works', () async {
@@ -955,27 +874,6 @@ void main() {
       await redis.setBuffer('buffer_random_corpus', payload);
       final received = await redis.getBuffer('buffer_random_corpus');
       expect(received, equals(payload));
-    });
-
-    test('cluster mode checks script keys are same slot', () async {
-      final clusterLike = Redis(RedisOptions(
-        host: commonOptions.host,
-        port: commonOptions.port,
-        password: commonOptions.password,
-        db: commonOptions.db,
-        enableClusterMode: true,
-      ));
-      addTearDown(() async {
-        await clusterLike.disconnect();
-      });
-
-      await expectLater(
-        clusterLike.eval(
-          'return 1',
-          keys: <String>['k:{1}', 'k:{2}'],
-        ),
-        throwsA(isA<RedisProtocolError>()),
-      );
     });
 
     // JSON Tests (if RedisJSON module is available)

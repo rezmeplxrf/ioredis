@@ -75,42 +75,6 @@ class RedisAuthError extends RedisCommandError {
   String toString() => 'RedisAuthError: $message';
 }
 
-class RedisMovedError extends RedisCommandError {
-  RedisMovedError({
-    required this.slot,
-    required this.host,
-    required this.port,
-    required String message,
-    List<String>? command,
-  }) : super(
-          'MOVED',
-          message,
-          command: command,
-        );
-
-  final int slot;
-  final String host;
-  final int port;
-}
-
-class RedisAskError extends RedisCommandError {
-  RedisAskError({
-    required this.slot,
-    required this.host,
-    required this.port,
-    required String message,
-    List<String>? command,
-  }) : super(
-          'ASK',
-          message,
-          command: command,
-        );
-
-  final int slot;
-  final String host;
-  final int port;
-}
-
 class RedisErrorMapper {
   static RedisError map(dynamic error, {List<String>? command}) {
     if (error is RedisError) {
@@ -130,47 +94,8 @@ class RedisErrorMapper {
         upper.startsWith('AUTH')) {
       return RedisAuthError(message, command: command);
     }
-    if (upper.startsWith('MOVED ')) {
-      final moved = _parseMovedAsk(message, command, moved: true);
-      if (moved != null) return moved;
-    }
-    if (upper.startsWith('ASK ')) {
-      final ask = _parseMovedAsk(message, command, moved: false);
-      if (ask != null) return ask;
-    }
     final code = _extractCode(message);
     return RedisCommandError(code, message, command: command);
-  }
-
-  static RedisCommandError? _parseMovedAsk(
-    String message,
-    List<String>? command, {
-    required bool moved,
-  }) {
-    final parts = message.split(' ');
-    if (parts.length < 3) return null;
-    final slot = int.tryParse(parts[1]);
-    final targetParts = parts[2].split(':');
-    if (slot == null || targetParts.length != 2) return null;
-    final host = targetParts[0];
-    final port = int.tryParse(targetParts[1]);
-    if (port == null) return null;
-    if (moved) {
-      return RedisMovedError(
-        slot: slot,
-        host: host,
-        port: port,
-        message: message,
-        command: command,
-      );
-    }
-    return RedisAskError(
-      slot: slot,
-      host: host,
-      port: port,
-      message: message,
-      command: command,
-    );
   }
 
   static String _extractCode(String message) {

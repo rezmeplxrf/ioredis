@@ -47,10 +47,7 @@ class RedisRetryPolicy {
     if (predicate != null) {
       return predicate(error, attempt, command);
     }
-    return error is RedisTimeoutError ||
-        error is RedisConnectionError ||
-        error is RedisAskError ||
-        error is RedisMovedError;
+    return error is RedisTimeoutError || error is RedisConnectionError;
   }
 
   Duration nextDelay(int attempt, [Random? random]) {
