@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -15,10 +16,12 @@ class _PendingCommand {
   _PendingCommand({
     required this.command,
     required this.completer,
+    required this.rawReply,
   });
 
   final List<String> command;
   final Completer<dynamic> completer;
+  final bool rawReply;
   Timer? timer;
 
   void dispose() {
@@ -54,6 +57,7 @@ class RedisConnection {
 
   /// Queue of pending command responses.
   final Queue<_PendingCommand> _pendingResponses = Queue<_PendingCommand>();
+  int get pendingCount => _pendingResponses.length;
 
   /// Serializer to send the command to redis
   final RedisMessageEncoder _encoder = RedisMessageEncoder();
@@ -77,6 +81,7 @@ class RedisConnection {
   Future<void>? _connectFuture;
 
   bool _isReconnecting = false;
+  Future<void> Function()? onReconnect;
 
   /// Get current connection status
   String getStatus() => status.name;
@@ -91,7 +96,23 @@ class RedisConnection {
   /// await redis.connect()
   /// ```
   Future<void> connect() async {
+    _emitEvent(RedisEvent(
+      type: RedisEventType.connectStart,
+      endpoint: '${option.host}:${option.port}',
+    ));
     await _connectGuarded(delayOnFailure: true);
+  }
+
+  /// Force reconnection, optionally after host/port has changed in options.
+  Future<void> reconnect({bool force = false}) async {
+    if (force) {
+      _setDisconnectedState();
+    }
+    _emitEvent(RedisEvent(
+      type: RedisEventType.reconnectAttempt,
+      endpoint: '${option.host}:${option.port}',
+    ));
+    await _connectGuarded(delayOnFailure: false);
   }
 
   Future<void> _connectGuarded({required bool delayOnFailure}) async {
@@ -120,46 +141,64 @@ class RedisConnection {
     if (existingSubscription != null) {
       unawaited(existingSubscription.cancel());
     }
-    _stream = _redisSocket
-        ?.transform<String>(transformer)
-        .transform<dynamic>(BufferedRedisResponseTransformer());
+    _stream =
+        _redisSocket?.transform<dynamic>(BufferedRedisResponseTransformer());
 
     _subscription = _stream?.listen(
       (dynamic packet) {
         try {
-          if (packet is List && packet.isNotEmpty && packet[0] is String) {
-            final type = packet[0] as String;
-            final pmessage = type == 'pmessage';
-            final rmessage = type == 'message';
-            final unsubscribe = type == 'unsubscribe';
-            final punsubscribe = type == 'punsubscribe';
-            final isMessage = rmessage || pmessage;
-            if (isMessage &&
-                ((pmessage && packet.length >= 4) ||
-                    (!pmessage && packet.length >= 3))) {
-              final channel = packet[pmessage ? 2 : 1] as String;
-              final message = packet[pmessage ? 3 : 2] as String?;
-              final cb = _findSubscribeListener(
-                pmessage ? packet[1] as String : channel,
-                isPattern: pmessage,
-              );
-              cb?.onMessage?.call(channel, message);
-            }
-            if (unsubscribe && packet.length >= 2) {
-              removeSubscriber(packet[1] as String, isPattern: false);
-            }
-            if (punsubscribe && packet.length >= 2) {
-              removeSubscriber(packet[1] as String, isPattern: true);
+          final packetPayload = packet is RedisPushData ? packet.items : packet;
+          if (packetPayload is List) {
+            final textPacket = _normalizeReply(packetPayload, rawReply: false);
+            if (textPacket is List &&
+                textPacket.isNotEmpty &&
+                textPacket[0] is String) {
+              final type = textPacket[0] as String;
+              final pmessage = type == 'pmessage';
+              final rmessage = type == 'message';
+              final smessage = type == 'smessage';
+              final unsubscribe = type == 'unsubscribe';
+              final punsubscribe = type == 'punsubscribe';
+              final sunsubscribe = type == 'sunsubscribe';
+              final isMessage = rmessage || pmessage || smessage;
+              if (isMessage &&
+                  ((pmessage && textPacket.length >= 4) ||
+                      (smessage && textPacket.length >= 3) ||
+                      (!pmessage && !smessage && textPacket.length >= 3))) {
+                final channel = textPacket[pmessage ? 2 : 1] as String;
+                final message = textPacket[pmessage ? 3 : 2] as String?;
+                final cb = _findSubscribeListener(
+                  pmessage ? textPacket[1] as String : channel,
+                  isPattern: pmessage,
+                  isSharded: smessage,
+                );
+                cb?.onMessage?.call(channel, message);
+              }
+              if (unsubscribe && textPacket.length >= 2) {
+                removeSubscriber(textPacket[1] as String,
+                    isPattern: false, isSharded: false);
+              }
+              if (punsubscribe && textPacket.length >= 2) {
+                removeSubscriber(textPacket[1] as String,
+                    isPattern: true, isSharded: false);
+              }
+              if (sunsubscribe && textPacket.length >= 2) {
+                removeSubscriber(textPacket[1] as String,
+                    isPattern: false, isSharded: true);
+              }
             }
           }
-        } catch (e, st) {
-          print('packet: $packet');
-          print(e);
-          print(st);
+        } catch (e) {
+          _throwSafeError(
+            RedisProtocolError(
+              'Failed to handle packet: $packet',
+              cause: e,
+            ),
+          );
         }
 
-        // Pub/Sub pushed messages are not command responses.
-        if (!_isPubSubPush(packet)) {
+        // RESP3 pushes and Pub/Sub pushes are not command responses.
+        if (!_isPush(packet) && !_isPubSubPush(packet)) {
           _completeNextPending(packet);
         }
       },
@@ -185,6 +224,10 @@ class RedisConnection {
     _shouldReconnect = false;
     _shouldThrowErrorOnConnection = false;
     status = RedisConnectionStatus.disconnected;
+    _emitEvent(RedisEvent(
+      type: RedisEventType.disconnect,
+      endpoint: '${option.host}:${option.port}',
+    ));
     _failAllPending(RedisConnectionError('Redis connection closed'));
     subscribeListeners.clear();
     final existingSubscription = _subscription;
@@ -200,6 +243,10 @@ class RedisConnection {
     _shouldReconnect = false;
     _shouldThrowErrorOnConnection = false;
     status = RedisConnectionStatus.disconnected;
+    _emitEvent(RedisEvent(
+      type: RedisEventType.disconnect,
+      endpoint: '${option.host}:${option.port}',
+    ));
     _failAllPending(RedisConnectionError('Redis connection destroyed'));
     subscribeListeners.clear();
     final existingSubscription = _subscription;
@@ -219,6 +266,11 @@ class RedisConnection {
     try {
       while (_shouldReconnect && status != RedisConnectionStatus.connected) {
         _totalRetry++;
+        _emitEvent(RedisEvent(
+          type: RedisEventType.reconnectAttempt,
+          endpoint: '${option.host}:${option.port}',
+          attempt: _totalRetry,
+        ));
         final retryDelay = option.retryStrategy?.call(_totalRetry) ??
             Duration(milliseconds: min(_totalRetry * 50, 2000));
         await Future<void>.delayed(retryDelay);
@@ -237,8 +289,10 @@ class RedisConnection {
 
   /// Send redis command.
   Future<dynamic> _sendCommand(
-    List<String> commandList, {
+    List<Object?> commandList, {
     Duration? timeout,
+    bool rawReply = false,
+    List<String>? commandForError,
   }) async {
     if (status != RedisConnectionStatus.connected || _redisSocket == null) {
       await connect();
@@ -249,13 +303,20 @@ class RedisConnection {
       throw RedisConnectionError('Redis connection is not available');
     }
 
-    final pending = _registerPending(commandList, timeout: timeout);
+    final pending = _registerPending(
+      commandForError ?? _commandSnapshot(commandList),
+      timeout: timeout,
+      rawReply: rawReply,
+    );
     try {
       socket.add(_encoder.encode(commandList));
     } catch (error) {
       _pendingResponses.remove(pending);
       pending.dispose();
-      throw RedisErrorMapper.map(error, command: commandList);
+      throw RedisErrorMapper.map(
+        error,
+        command: commandForError ?? _commandSnapshot(commandList),
+      );
     }
 
     return pending.completer.future;
@@ -268,7 +329,28 @@ class RedisConnection {
   }) async {
     _inFlight++;
     try {
-      final value = await _sendCommand(commandList, timeout: timeout);
+      final value = await _sendCommand(
+        commandList,
+        timeout: timeout,
+        commandForError: List<String>.from(commandList),
+      );
+      return value;
+    } finally {
+      _inFlight--;
+    }
+  }
+
+  Future<dynamic> sendBufferCommand(
+    List<Object?> commandList, {
+    Duration? timeout,
+  }) async {
+    _inFlight++;
+    try {
+      final value = await _sendCommand(
+        commandList,
+        timeout: timeout,
+        rawReply: true,
+      );
       return value;
     } finally {
       _inFlight--;
@@ -293,6 +375,14 @@ class RedisConnection {
       final socket = _redisSocket;
       if (socket == null || status != RedisConnectionStatus.connected) {
         throw RedisConnectionError('Redis connection is not available');
+      }
+
+      final maxPending = option.maxPendingCommands;
+      if (_pendingResponses.length + commands.length > maxPending) {
+        throw RedisConnectionError(
+          'Backpressure: too many pending commands '
+          '(${_pendingResponses.length + commands.length}/$maxPending)',
+        );
       }
 
       final pending = <_PendingCommand>[];
@@ -326,28 +416,39 @@ class RedisConnection {
 
   /// Get subscribe listener callback related to the channel or pattern
   RedisSubscriber? _findSubscribeListener(String channel,
-      {required bool isPattern}) {
+      {required bool isPattern, required bool isSharded}) {
     final cb = subscribeListeners.firstWhereOrNull(
-      (e) => e.channel == channel && e.isPattern == isPattern,
+      (e) =>
+          e.channel == channel &&
+          e.isPattern == isPattern &&
+          e.isSharded == isSharded,
     );
     return cb;
   }
 
   void addSubscriber(RedisSubscriber subscriber) {
-    removeSubscriber(subscriber.channel, isPattern: subscriber.isPattern);
+    removeSubscriber(
+      subscriber.channel,
+      isPattern: subscriber.isPattern,
+      isSharded: subscriber.isSharded,
+    );
     subscribeListeners.add(subscriber);
   }
 
-  void removeSubscriber(String channel, {required bool isPattern}) {
+  void removeSubscriber(String channel,
+      {required bool isPattern, required bool isSharded}) {
     subscribeListeners.removeWhere(
       (listener) =>
-          listener.channel == channel && listener.isPattern == isPattern,
+          listener.channel == channel &&
+          listener.isPattern == isPattern &&
+          listener.isSharded == isSharded,
     );
   }
 
-  void removeAllSubscribers({required bool isPattern}) {
-    subscribeListeners
-        .removeWhere((listener) => listener.isPattern == isPattern);
+  void removeAllSubscribers(
+      {required bool isPattern, required bool isSharded}) {
+    subscribeListeners.removeWhere((listener) =>
+        listener.isPattern == isPattern && listener.isSharded == isSharded);
   }
 
   /// Login to redis
@@ -364,6 +465,26 @@ class RedisConnection {
       }
       return result;
     }
+  }
+
+  Future<dynamic> _hello() async {
+    final protocolVersion = option.protocolVersion;
+    if (protocolVersion == 2) {
+      return null;
+    }
+
+    final command = <String>['HELLO', '$protocolVersion'];
+    final password = option.password;
+    if (password != null) {
+      command.addAll(<String>[
+        'AUTH',
+        option.username ?? 'default',
+        password,
+      ]);
+    }
+
+    final result = await _sendCommand(command);
+    return result;
   }
 
   /// Select database index
@@ -387,8 +508,6 @@ class RedisConnection {
     final onError = option.onError;
     if (onError != null) {
       onError(err);
-    } else {
-      print(err);
     }
   }
 
@@ -418,15 +537,27 @@ class RedisConnection {
 
       /// Set status as connected
       status = RedisConnectionStatus.connected;
+      _emitEvent(RedisEvent(
+        type: RedisEventType.connectSuccess,
+        endpoint: '${option.host}:${option.port}',
+      ));
 
       /// Once socket is connect reset retry count to zero
       _totalRetry = 0;
 
+      await _hello();
+
       /// If username is provided, we need to login before calling other commands
-      await _login();
+      if (option.protocolVersion == 2) {
+        await _login();
+      }
 
       /// Select database index
       await _selectDatabaseIndex();
+      final reconnectHook = onReconnect;
+      if (reconnectHook != null) {
+        await reconnectHook();
+      }
     } on SocketException catch (error) {
       _setDisconnectedState();
       final mapped = RedisConnectionError(error.message, cause: error);
@@ -440,12 +571,46 @@ class RedisConnection {
     }
   }
 
+  void _emitEvent(RedisEvent event) {
+    final cb = option.onEvent;
+    if (cb != null) {
+      cb(event);
+    }
+  }
+
   bool _isPubSubPush(dynamic packet) {
-    if (packet is! List || packet.isEmpty || packet[0] is! String) {
+    final type = _packetType(packet);
+    if (type == null) {
       return false;
     }
-    final type = packet[0] as String;
-    return type == 'message' || type == 'pmessage';
+    return type == 'message' || type == 'pmessage' || type == 'smessage';
+  }
+
+  bool _isPush(dynamic packet) {
+    return packet is RedisPushData;
+  }
+
+  String? _packetType(dynamic packet) {
+    if (packet is RedisPushData) {
+      if (packet.items.isEmpty) return null;
+      final first = packet.items.first;
+      if (first is RedisBulkData) {
+        return utf8.decode(first.bytes);
+      }
+      if (first is String) return first;
+      return null;
+    }
+    if (packet is! List || packet.isEmpty) {
+      return null;
+    }
+    final first = packet[0];
+    if (first is String) {
+      return first;
+    }
+    if (first is RedisBulkData) {
+      return utf8.decode(first.bytes);
+    }
+    return null;
   }
 
   void _completeNextPending(dynamic packet) {
@@ -466,17 +631,35 @@ class RedisConnection {
       return;
     }
 
-    pending.completer.complete(packet);
+    try {
+      pending.completer.complete(
+        _normalizeReply(packet, rawReply: pending.rawReply),
+      );
+    } catch (error) {
+      pending.completer.completeError(
+        RedisErrorMapper.map(error, command: pending.command),
+      );
+    }
   }
 
   _PendingCommand _registerPending(
     List<String> command, {
     Duration? timeout,
+    bool rawReply = false,
   }) {
+    final maxPending = option.maxPendingCommands;
+    if (_pendingResponses.length >= maxPending) {
+      throw RedisConnectionError(
+        'Backpressure: too many pending commands '
+        '(${_pendingResponses.length}/$maxPending)',
+        command: command,
+      );
+    }
     final completer = Completer<dynamic>();
     final entry = _PendingCommand(
       command: List<String>.from(command),
       completer: completer,
+      rawReply: rawReply,
     );
 
     final effectiveTimeout = timeout ?? option.commandTimeout;
@@ -525,5 +708,56 @@ class RedisConnection {
     _subscription = null;
     _redisSocket?.destroy();
     _redisSocket = null;
+  }
+
+  List<String> _commandSnapshot(List<Object?> commandList) {
+    return commandList
+        .map(
+          (part) => switch (part) {
+            final Uint8List bytes => '<bytes:${bytes.length}>',
+            null => 'null',
+            _ => part.toString(),
+          },
+        )
+        .toList(growable: false);
+  }
+
+  dynamic _normalizeReply(dynamic packet, {required bool rawReply}) {
+    if (packet is RedisBulkData) {
+      if (rawReply) {
+        return packet.bytes;
+      }
+      return utf8.decode(packet.bytes);
+    }
+    if (packet is RedisPushData) {
+      return RedisPushData(
+        packet.items
+            .map((item) => _normalizeReply(item, rawReply: rawReply))
+            .toList(),
+      );
+    }
+    if (packet is RedisAttributedData) {
+      // Keep response compatibility for existing APIs by returning the wrapped data.
+      return _normalizeReply(packet.data, rawReply: rawReply);
+    }
+    if (packet is Map<dynamic, dynamic>) {
+      return packet.map(
+        (key, value) => MapEntry(
+          _normalizeReply(key, rawReply: rawReply),
+          _normalizeReply(value, rawReply: rawReply),
+        ),
+      );
+    }
+    if (packet is Set<dynamic>) {
+      return packet
+          .map((item) => _normalizeReply(item, rawReply: rawReply))
+          .toSet();
+    }
+    if (packet is List<dynamic>) {
+      return packet
+          .map((item) => _normalizeReply(item, rawReply: rawReply))
+          .toList();
+    }
+    return packet;
   }
 }

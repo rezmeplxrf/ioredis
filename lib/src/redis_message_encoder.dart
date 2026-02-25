@@ -31,16 +31,21 @@ class RedisMessageEncoder {
   }
 
   void _consume(Object? object, BytesBuilder buffer) {
-    if (object is String) {
-      _encodeString(object, buffer);
-    } else if (object is Iterable) {
-      _encodeArray(object, buffer);
-    } else if (object is int) {
-      _encodeInteger(object, buffer);
-    } else if (object == null) {
-      buffer.add(_nullValue);
-    } else {
-      throw Exception('unable to serialize type: ${object.runtimeType}');
+    switch (object) {
+      case String():
+        _encodeString(object, buffer);
+      case Uint8List():
+        _encodeBinary(object, buffer);
+      case Iterable():
+        _encodeArray(object, buffer);
+      case int():
+        _encodeInteger(object, buffer);
+      default:
+        if (object == null) {
+          buffer.add(_nullValue);
+        } else {
+          throw Exception('unable to serialize type: ${object.runtimeType}');
+        }
     }
   }
 
@@ -70,6 +75,16 @@ class RedisMessageEncoder {
     for (final dynamic item in array) {
       _consume(item is int ? item.toString() : item, buffer);
     }
+  }
+
+  void _encodeBinary(Uint8List data, BytesBuilder buffer) {
+    buffer.add(_dollar);
+    final lengthBytes =
+        _lengthCache[data.length] ?? ascii.encode(data.length.toString());
+    buffer.add(lengthBytes);
+    buffer.add(_crlf);
+    buffer.add(data);
+    buffer.add(_crlf);
   }
 
   void _encodeInteger(int value, BytesBuilder buffer) {

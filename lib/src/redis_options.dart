@@ -1,4 +1,15 @@
+import 'package:ioredis/src/redis_event.dart';
 import 'package:ioredis/src/redis_retry_policy.dart';
+
+class RedisSentinelNode {
+  const RedisSentinelNode({
+    required this.host,
+    required this.port,
+  });
+
+  final String host;
+  final int port;
+}
 
 class RedisOptions {
   RedisOptions({
@@ -16,6 +27,15 @@ class RedisOptions {
     this.onError,
     this.maxConnection = 10,
     this.idleTimeout = const Duration(seconds: 10),
+    this.protocolVersion = 2,
+    this.enableClusterMode = false,
+    this.maxClusterRedirects = 5,
+    this.enableSentinelMode = false,
+    this.sentinelMasterName,
+    this.sentinels = const <RedisSentinelNode>[],
+    this.onEvent,
+    this.pipelineBatchSize = 256,
+    this.maxPendingCommands = 10000,
   });
 
   /// timeout value for socket connection
@@ -52,6 +72,9 @@ class RedisOptions {
   /// error handler
   void Function(dynamic)? onError;
 
+  /// structured event callback for observability.
+  void Function(RedisEvent event)? onEvent;
+
   /// key prefix
   /// ```
   /// Redis fooRedis = new Redis(RedisOption(keyPrefix: 'foo'));
@@ -64,6 +87,31 @@ class RedisOptions {
 
   /// timeout duration of idle connection in the pool, default to 10s
   Duration idleTimeout;
+
+  /// RESP protocol version.
+  /// 2 = RESP2 (default), 3 = RESP3 via HELLO.
+  int protocolVersion;
+
+  /// enable MOVED/ASK auto redirect handling.
+  bool enableClusterMode;
+
+  /// maximum redirects for a single command in cluster mode.
+  int maxClusterRedirects;
+
+  /// enable Sentinel master discovery and failover handling.
+  bool enableSentinelMode;
+
+  /// monitored master name in Sentinel.
+  String? sentinelMasterName;
+
+  /// sentinel endpoints for master discovery.
+  List<RedisSentinelNode> sentinels;
+
+  /// max commands written in one pipeline batch.
+  int pipelineBatchSize;
+
+  /// hard cap for pending responses to bound memory usage.
+  int maxPendingCommands;
 }
 
 class RedisSetOption {}

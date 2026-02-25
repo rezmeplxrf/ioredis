@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ioredis/ioredis.dart';
 import 'package:test/test.dart';
@@ -103,6 +104,133 @@ void main() {
       expect(data1, data2);
     });
 
+    test('cluster key slot uses hash tags', () async {
+      final slotA = redis.keySlot('user:{42}:profile');
+      final slotB = redis.keySlot('orders:{42}:recent');
+      final slotC = redis.keySlot('orders:{43}:recent');
+
+      expect(slotA, equals(slotB));
+      expect(slotA, isNot(equals(slotC)));
+      expect(slotA, inInclusiveRange(0, 16383));
+    });
+
+    test('cluster diagnostics exposes cache state', () {
+      final diagnostics = redis.clusterDiagnostics();
+      expect(diagnostics.enabled, equals(commonOptions.enableClusterMode));
+      expect(diagnostics.knownSlotCount, greaterThanOrEqualTo(0));
+      expect(diagnostics.knownNodeEndpoints, isA<List<String>>());
+    });
+
+    test('command events are emitted via onEvent', () async {
+      final events = <RedisEvent>[];
+      final observed = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        onEvent: events.add,
+      ));
+      addTearDown(() async {
+        await observed.disconnect();
+      });
+
+      await observed.set('event:hook:key', 'ok');
+      final value = await observed.get('event:hook:key');
+      expect(value, equals('ok'));
+      expect(
+        events.any((e) => e.type == RedisEventType.commandSuccess),
+        isTrue,
+      );
+    });
+
+    test('sentinel refresh validates required configuration', () async {
+      final sentinel = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        enableSentinelMode: true,
+      ));
+      addTearDown(() async {
+        await sentinel.disconnect();
+      });
+
+      await expectLater(
+        sentinel.refreshSentinelMaster(),
+        throwsA(isA<RedisProtocolError>()),
+      );
+    });
+
+    test('warmClusterSlots is safe when cluster mode disabled', () async {
+      final nonCluster = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+      ));
+      addTearDown(() async {
+        await nonCluster.disconnect();
+      });
+
+      final warmed = await nonCluster.warmClusterSlots();
+      expect(warmed, isFalse);
+      final diagnostics = nonCluster.clusterDiagnostics();
+      expect(diagnostics.knownSlotCount, equals(0));
+      expect(diagnostics.lastRefreshedAt, isNull);
+    });
+
+    test('cluster mode enforces same-slot for multi-key commands', () async {
+      final clusterLike = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        enableClusterMode: true,
+      ));
+      addTearDown(() async {
+        await clusterLike.disconnect();
+      });
+
+      await expectLater(
+        clusterLike.sendCommand(<String>[
+          'MGET',
+          'user:{1}:a',
+          'user:{2}:b',
+        ]),
+        throwsA(isA<RedisProtocolError>()),
+      );
+
+      await clusterLike.set('user:{42}:a', 'x');
+      await clusterLike.set('user:{42}:b', 'y');
+      final values =
+          await clusterLike.mget(<String>['user:{42}:a', 'user:{42}:b']);
+      expect(values, equals(<String?>['x', 'y']));
+    });
+
+    test('protocolVersion 3 connection works', () async {
+      final resp3 = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        protocolVersion: 3,
+      ));
+      addTearDown(() async {
+        await resp3.disconnect();
+      });
+
+      try {
+        await resp3.set('resp3:key', 'ok');
+        expect(await resp3.get('resp3:key'), equals('ok'));
+      } catch (e) {
+        final upper = e.toString().toUpperCase();
+        if (upper.contains('UNKNOWN COMMAND') && upper.contains('HELLO')) {
+          return;
+        }
+        rethrow;
+      }
+    });
+
     test('pub/sub', () async {
       final sub = Redis(commonOptions);
       addTearDown(() async {
@@ -134,6 +262,92 @@ void main() {
 
       expect(await chat1.future.timeout(const Duration(seconds: 2)), 'hi');
       expect(await chat2.future.timeout(const Duration(seconds: 2)), 'hello');
+    });
+
+    test('publish does not lock client into publisher mode', () async {
+      final client = Redis(commonOptions);
+      addTearDown(() async {
+        await client.disconnect();
+      });
+
+      await client.publish('mode_check_room', 'ping');
+      final subscriber = await client.subscribe('mode_check_room');
+      expect(subscriber.channel, equals('mode_check_room'));
+      await client.unsubscribe('mode_check_room');
+    });
+
+    test('resubscribes active listeners after reconnect', () async {
+      final reconnectOptions = RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        onError: (_) {},
+      );
+      final sub = Redis(reconnectOptions);
+      final killer = sub.duplicate();
+      final pub = sub.duplicate();
+      addTearDown(() async {
+        await sub.disconnect();
+        await killer.disconnect();
+        await pub.disconnect();
+      });
+
+      final clientIdRaw = await sub.sendCommand(<String>['CLIENT', 'ID']);
+      final clientId =
+          clientIdRaw is int ? clientIdRaw : int.parse(clientIdRaw.toString());
+
+      final received = Completer<String?>();
+      final listener = await sub.subscribe('reconnect_room');
+      listener.onMessage = (channel, message) {
+        if (channel == 'reconnect_room' && !received.isCompleted) {
+          received.complete(message);
+        }
+      };
+
+      await killer.sendCommand(<String>[
+        'CLIENT',
+        'KILL',
+        'ID',
+        clientId.toString(),
+      ]);
+
+      for (var i = 0; i < 10 && !received.isCompleted; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        await pub.publish('reconnect_room', 'after_reconnect');
+      }
+
+      expect(
+        await received.future.timeout(const Duration(seconds: 4)),
+        equals('after_reconnect'),
+      );
+    });
+
+    test('packet handling errors are routed to onError', () async {
+      final errors = <dynamic>[];
+      final sub = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        onError: errors.add,
+      ));
+      final pub = sub.duplicate();
+      addTearDown(() async {
+        await sub.disconnect();
+        await pub.disconnect();
+      });
+
+      final listener = await sub.subscribe('error_hook_room');
+      listener.onMessage = (channel, message) {
+        throw StateError('handler-failure');
+      };
+
+      await pub.publish('error_hook_room', 'boom');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(errors, isNotEmpty);
+      expect(errors.any((e) => e is RedisProtocolError), isTrue);
     });
 
     test('unsubscribe API cleans listener', () async {
@@ -432,6 +646,21 @@ void main() {
       expect(second, isEmpty);
     });
 
+    test('multi discards transaction when queueing fails', () async {
+      final tx = redis.multi()
+        ..set('discard_key', 'v1')
+        ..command(<String>['NOT_A_REDIS_COMMAND'])
+        ..set('discard_key', 'v2');
+
+      await expectLater(
+        tx.exec(),
+        throwsA(isA<RedisCommandError>()),
+      );
+
+      await redis.set('post_discard_key', 'ok');
+      expect(await redis.get('post_discard_key'), equals('ok'));
+    });
+
     test('pipeline batches writes and keeps response order', () async {
       final result = redis.pipeline()
         ..set('pipe_k1', 'v1')
@@ -466,6 +695,41 @@ void main() {
       expect(await redis.get('pipepref:pipepref:k1'), isNull);
     });
 
+    test('pipeline supports explicit batch size and preserves order', () async {
+      final result = await (redis.pipeline()
+            ..set('pipe_batch_k1', 'v1')
+            ..set('pipe_batch_k2', 'v2')
+            ..set('pipe_batch_k3', 'v3')
+            ..get('pipe_batch_k1')
+            ..get('pipe_batch_k2')
+            ..get('pipe_batch_k3'))
+          .exec(batchSize: 2);
+
+      expect(result, equals(<dynamic>['OK', 'OK', 'OK', 'v1', 'v2', 'v3']));
+    });
+
+    test('pipeline enforces maxPendingCommands backpressure', () async {
+      final constrained = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        maxPendingCommands: 2,
+      ));
+      addTearDown(() async {
+        await constrained.disconnect();
+      });
+
+      await expectLater(
+        constrained.sendPipeline(<List<String>>[
+          <String>['SET', 'bp:k1', '1'],
+          <String>['SET', 'bp:k2', '2'],
+          <String>['SET', 'bp:k3', '3'],
+        ]),
+        throwsA(isA<RedisConnectionError>()),
+      );
+    });
+
     test('retry policy honors max attempts', () async {
       var retriesInvoked = 0;
       final retryPolicy = RedisRetryPolicy(
@@ -488,6 +752,135 @@ void main() {
       expect(retriesInvoked, 2);
     });
 
+    test('core data-structure command wrappers', () async {
+      final ns = DateTime.now().microsecondsSinceEpoch;
+      final hashKey = 'p2:$ns:hash';
+      final listKey = 'p2:$ns:list';
+      final setKey = 'p2:$ns:set';
+      final zsetKey = 'p2:$ns:zset';
+
+      await redis.hset(hashKey, 'f1', 'v1');
+      await redis.hset(hashKey, 'f2', 'v2');
+      expect(await redis.hget(hashKey, 'f1'), equals('v1'));
+      expect(
+        await redis.hmget(hashKey, <String>['f1', 'f2', 'f3']),
+        equals(<String?>['v1', 'v2', null]),
+      );
+
+      expect(await redis.lpush(listKey, <String>['a', 'b']), equals(2));
+      expect(await redis.rpush(listKey, <String>['c']), equals(3));
+      expect(
+          await redis.lrange(listKey, 0, -1), equals(<String>['b', 'a', 'c']));
+
+      expect(await redis.sadd(setKey, <String>['x', 'y', 'x']), equals(2));
+      final members = await redis.smembers(setKey);
+      expect(members.toSet(), equals(<String>{'x', 'y'}));
+
+      await redis.zadd(zsetKey, 1.5, 'm1');
+      await redis.zadd(zsetKey, 2.5, 'm2');
+      expect(
+        await redis.zrange(zsetKey, 0, -1, withScores: true),
+        equals(<String>['m1', '1.5', 'm2', '2.5']),
+      );
+    });
+
+    test('scriptLoad and evalsha with NOSCRIPT reload fallback', () async {
+      const script = 'return ARGV[1]';
+      final sha = await redis.scriptLoad(script);
+      final direct = await redis.evalsha(sha, args: <dynamic>['ok']);
+      expect(direct, equals('ok'));
+
+      final fallback = await redis.evalsha(
+        'ffffffffffffffffffffffffffffffffffffffff',
+        args: <dynamic>['fallback'],
+        reloadOnNoScript: true,
+        scriptOnNoScript: script,
+      );
+      expect(fallback, equals('fallback'));
+    });
+
+    test('scan iterators return expected values', () async {
+      for (var i = 0; i < 5; i++) {
+        await redis.set('p2:scan:key:$i', 'v$i');
+      }
+      final keys =
+          await redis.scanIterator(match: 'p2:scan:key:*', count: 2).toList();
+      expect(
+          keys.toSet(),
+          equals(<String>{
+            'p2:scan:key:0',
+            'p2:scan:key:1',
+            'p2:scan:key:2',
+            'p2:scan:key:3',
+            'p2:scan:key:4',
+          }));
+
+      await redis.hset('p2:scan:hash', 'a', '1');
+      await redis.hset('p2:scan:hash', 'b', '2');
+      final hPairs =
+          await redis.hscanIterator('p2:scan:hash', count: 1).toList();
+      final hMap = Map<String, String>.fromEntries(hPairs);
+      expect(hMap['a'], equals('1'));
+      expect(hMap['b'], equals('2'));
+
+      await redis.sadd('p2:scan:set', <String>['s1', 's2']);
+      final sMembers =
+          await redis.sscanIterator('p2:scan:set', count: 1).toList();
+      expect(sMembers.toSet(), equals(<String>{'s1', 's2'}));
+
+      await redis.zadd('p2:scan:zset', 1, 'z1');
+      await redis.zadd('p2:scan:zset', 2, 'z2');
+      final zPairs =
+          await redis.zscanIterator('p2:scan:zset', count: 1).toList();
+      final zMap = Map<String, double>.fromEntries(zPairs);
+      expect(zMap['z1'], equals(1));
+      expect(zMap['z2'], equals(2));
+    });
+
+    test('xadd and xrange wrappers', () async {
+      final id = await redis.xadd('p2:stream', '*', <String, String>{
+        'field1': 'value1',
+        'field2': 'value2',
+      });
+      expect(id, contains('-'));
+
+      final rows = await redis.xrange('p2:stream', '-', '+', count: 10);
+      expect(rows, isNotEmpty);
+      expect(rows.first, isA<List<dynamic>>());
+    });
+
+    test('sharded pub/sub works when supported', () async {
+      final sub = Redis(commonOptions);
+      final pub = sub.duplicate();
+      addTearDown(() async {
+        await sub.disconnect();
+        await pub.disconnect();
+      });
+
+      try {
+        final received = Completer<String?>();
+        final listener = await sub.ssubscribe('p2:shard:room');
+        listener.onMessage = (channel, message) {
+          if (channel == 'p2:shard:room' && !received.isCompleted) {
+            received.complete(message);
+          }
+        };
+
+        await pub.spublish('p2:shard:room', 'hello-shard');
+        expect(
+          await received.future.timeout(const Duration(seconds: 2)),
+          equals('hello-shard'),
+        );
+        await sub.sunsubscribe('p2:shard:room');
+      } catch (e) {
+        if (_isUnknownCommand(e, 'SSUBSCRIBE') ||
+            _isUnknownCommand(e, 'SPUBLISH')) {
+          return;
+        }
+        rethrow;
+      }
+    });
+
     test('special Redis protocol characters in values', () async {
       // Test values that contain Redis protocol special characters
       final specialValues = [
@@ -505,6 +898,84 @@ void main() {
         final retrieved = await redis.get(key);
         expect(retrieved, equals(value));
       }
+    });
+
+    test('integer replies are parsed as int', () async {
+      await redis.set('int_reply_key', '41');
+      final value = await redis.sendCommand(<String>['INCR', 'int_reply_key']);
+      expect(value, isA<int>());
+      expect(value, equals(42));
+    });
+
+    test('setBuffer/getBuffer supports binary payloads', () async {
+      final payload = Uint8List.fromList(<int>[
+        0,
+        1,
+        2,
+        3,
+        255,
+        254,
+        128,
+        64,
+        10,
+        13,
+        0,
+      ]);
+      await redis.setBuffer('buffer_key', payload);
+      final received = await redis.getBuffer('buffer_key');
+      expect(received, isNotNull);
+      expect(received, equals(payload));
+    });
+
+    test('getBuffer roundtrips invalid UTF-8 bytes', () async {
+      final payload = Uint8List.fromList(<int>[
+        0xF0,
+        0x28,
+        0x8C,
+        0x28,
+      ]);
+      await redis.setBuffer('invalid_utf8_key', payload);
+      final bytes = await redis.getBuffer('invalid_utf8_key');
+      expect(bytes, equals(payload));
+      await expectLater(
+        redis.get('invalid_utf8_key'),
+        throwsA(
+          isA<RedisConnectionError>().having(
+            (e) => e.cause,
+            'cause',
+            isA<FormatException>(),
+          ),
+        ),
+      );
+    });
+
+    test('setBuffer/getBuffer roundtrips random binary corpus', () async {
+      final payload =
+          Uint8List.fromList(List<int>.generate(512, (i) => (i * 73) % 256));
+      await redis.setBuffer('buffer_random_corpus', payload);
+      final received = await redis.getBuffer('buffer_random_corpus');
+      expect(received, equals(payload));
+    });
+
+    test('cluster mode checks script keys are same slot', () async {
+      final clusterLike = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        enableClusterMode: true,
+      ));
+      addTearDown(() async {
+        await clusterLike.disconnect();
+      });
+
+      await expectLater(
+        clusterLike.eval(
+          'return 1',
+          keys: <String>['k:{1}', 'k:{2}'],
+        ),
+        throwsA(isA<RedisProtocolError>()),
+      );
     });
 
     // JSON Tests (if RedisJSON module is available)
@@ -658,4 +1129,9 @@ void main() {
 bool _isRedisJsonUnavailable(Object error) {
   final message = error.toString().toUpperCase();
   return message.contains('UNKNOWN COMMAND') && message.contains('JSON.');
+}
+
+bool _isUnknownCommand(Object error, String command) {
+  final message = error.toString().toUpperCase();
+  return message.contains('UNKNOWN COMMAND') && message.contains(command);
 }

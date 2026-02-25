@@ -19,22 +19,44 @@ class RedisMulti {
     return this;
   }
 
+  /// add a custom command
+  RedisMulti command(List<String> command) {
+    _commands.add(List<String>.from(command));
+    return this;
+  }
+
   /// exec multi command
   Future<List<dynamic>> exec() async {
     final commands = List<List<String>>.from(_commands);
     _commands.clear();
 
-    await _redis.sendCommand(<String>['MULTI']);
-    for (final command in commands) {
-      await _redis.sendCommand(command);
+    final txRedis = _redis.duplicate();
+    var multiStarted = false;
+    var execSent = false;
+    try {
+      await txRedis.connection.sendCommand(<String>['MULTI']);
+      multiStarted = true;
+      for (final command in commands) {
+        await txRedis.connection.sendCommand(command);
+      }
+      execSent = true;
+      final result = await txRedis.connection.sendCommand(<String>['EXEC']);
+      if (result is List<dynamic>) {
+        return result;
+      }
+      if (result == null) {
+        return <dynamic>[];
+      }
+      throw StateError('Unexpected response for EXEC: ${result.runtimeType}');
+    } catch (_) {
+      if (multiStarted && !execSent) {
+        try {
+          await txRedis.connection.sendCommand(<String>['DISCARD']);
+        } catch (_) {}
+      }
+      rethrow;
+    } finally {
+      await txRedis.disconnect();
     }
-    final result = await _redis.sendCommand(<String>['EXEC']);
-    if (result is List<dynamic>) {
-      return result;
-    }
-    if (result == null) {
-      return <dynamic>[];
-    }
-    throw StateError('Unexpected response for EXEC: ${result.runtimeType}');
   }
 }

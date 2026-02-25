@@ -66,8 +66,31 @@ final redis = Redis(RedisOptions(
   db: 1,
   connectTimeout: Duration(seconds: 10),
   commandTimeout: Duration(seconds: 5),
-  retryAttempts: 3,
+  retryPolicy: RedisRetryPolicy(
+    maxAttempts: 3,
+    initialDelay: Duration(milliseconds: 50),
+  ),
+  protocolVersion: 3, // optional RESP3 via HELLO
+  enableClusterMode: true, // optional MOVED/ASK auto redirects
+  maxClusterRedirects: 5,
+  pipelineBatchSize: 256, // split large pipelines into smaller writes
+  maxPendingCommands: 10000, // backpressure cap for in-flight responses
+  // optional Sentinel support
+  enableSentinelMode: true,
+  sentinelMasterName: 'mymaster',
+  sentinels: const [
+    RedisSentinelNode(host: '127.0.0.1', port: 26379),
+  ],
+  // optional observability hook
+  onEvent: (event) {
+    print('${event.type} ${event.command} ${event.duration}');
+  },
 ));
+
+// Optional: eagerly warm cluster slots cache at startup
+await redis.warmClusterSlots();
+// Optional: force Sentinel re-resolution
+await redis.refreshSentinelMaster();
 ```
 
 ## API Reference
@@ -194,10 +217,11 @@ print('$greeting $emoji');
 ### Binary Data
 
 ```dart
-// Store binary-like data
-await redis.set('binary', 'Hello\x00World\x01\x02\x03');
-final binary = await redis.get('binary');
-print(binary); // Preserves null bytes and special characters
+// Store and load raw bytes safely
+final bytes = Uint8List.fromList([0, 1, 2, 3, 255, 254, 128]);
+await redis.setBuffer('binary', bytes);
+final binary = await redis.getBuffer('binary');
+print(binary); // Uint8List with identical bytes
 ```
 
 ### Large Values
@@ -340,6 +364,36 @@ Check out the `example/` directory for more comprehensive examples:
 
 - `ioredis_example.dart` - Basic usage examples
 - `benchmark/performance_test.dart` - Performance benchmarks
+
+## Testing
+
+Run the standard suite:
+
+```bash
+dart test
+```
+
+Run the opt-in live cluster migration integration test:
+
+```bash
+REDIS_CLUSTER_INTEGRATION=1 \
+REDIS_CLUSTER_SEED_HOST=127.0.0.1 \
+REDIS_CLUSTER_SEED_PORT=7000 \
+dart test test/redis_cluster_integration_test.dart
+```
+
+This suite includes both MOVED and ASK redirect scenarios and mutates slot
+ownership/state temporarily; use only on disposable or dedicated test clusters.
+
+Run the opt-in Sentinel integration test:
+
+```bash
+REDIS_SENTINEL_INTEGRATION=1 \
+REDIS_SENTINEL_HOST=127.0.0.1 \
+REDIS_SENTINEL_PORT=26379 \
+REDIS_SENTINEL_MASTER=mymaster \
+dart test test/redis_sentinel_integration_test.dart
+```
 
 ## Requirements
 

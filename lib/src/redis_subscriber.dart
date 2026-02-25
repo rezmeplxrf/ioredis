@@ -7,11 +7,13 @@ class RedisSubscriber {
   RedisSubscriber({
     required this.channel,
     required this.isPattern,
+    this.isSharded = false,
     this.onMessage,
     RedisUnsubscribeHandler? onUnsubscribe,
   }) : _onUnsubscribe = onUnsubscribe;
   final String channel;
   final bool isPattern;
+  final bool isSharded;
   RedisSubscriberCallback? onMessage;
   final RedisUnsubscribeHandler? _onUnsubscribe;
 
@@ -23,5 +25,5 @@ class RedisSubscriber {
 
   @override
   String toString() =>
-      'RedisSubscriber(channel: $channel, isPattern: $isPattern, onMessage: $onMessage)';
+      'RedisSubscriber(channel: $channel, isPattern: $isPattern, isSharded: $isSharded, onMessage: $onMessage)';
 }

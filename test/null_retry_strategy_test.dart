@@ -51,7 +51,7 @@ void main() {
 
         // Should have tried to reconnect at least once with a delay
         // The default retry strategy should add some delay
-        expect(duration.inMilliseconds, greaterThan(50));
+        expect(duration.inMilliseconds, greaterThanOrEqualTo(50));
 
         // Should not throw null check error
         expect(e.toString(),

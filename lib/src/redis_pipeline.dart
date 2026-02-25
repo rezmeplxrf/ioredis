@@ -27,12 +27,16 @@ class RedisPipeline {
     return this;
   }
 
-  Future<List<dynamic>> exec({Duration? timeout}) async {
+  Future<List<dynamic>> exec({Duration? timeout, int? batchSize}) async {
     final commands = List<List<String>>.from(_commands);
     _commands.clear();
     if (commands.isEmpty) {
       return <dynamic>[];
     }
-    return _redis.sendPipeline(commands, timeout: timeout);
+    return _redis.sendPipeline(
+      commands,
+      timeout: timeout,
+      batchSize: batchSize,
+    );
   }
 }

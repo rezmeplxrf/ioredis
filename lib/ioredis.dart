@@ -2,6 +2,7 @@ export 'src/redis.dart';
 export 'src/redis_connection.dart';
 export 'src/redis_connection_status.dart';
 export 'src/redis_error.dart';
+export 'src/redis_event.dart';
 export 'src/redis_options.dart';
 export 'src/redis_pipeline.dart';
 export 'src/redis_retry_policy.dart';
