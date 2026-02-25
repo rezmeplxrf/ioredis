@@ -6,5 +6,6 @@ export 'src/redis_event.dart';
 export 'src/redis_optimistic_transaction.dart';
 export 'src/redis_options.dart';
 export 'src/redis_pipeline.dart';
+export 'src/redis_response.dart';
 export 'src/redis_retry_policy.dart';
 export 'src/redis_subscriber.dart';

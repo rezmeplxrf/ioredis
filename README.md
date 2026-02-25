@@ -6,7 +6,7 @@ connection pooling, pipelines, transactions, pub/sub, and binary-safe payloads.
 ## Features
 
 - Connection management with auto-reconnect
-- Optional RESP3 (`HELLO 3`) support
+- RESP3 by default (`HELLO 3`) with automatic fallback to RESP2 when unsupported
 - Retry policies with backoff and jitter
 - Pipelines with configurable batch size
 - MULTI/EXEC and WATCH-based optimistic transactions
@@ -59,7 +59,14 @@ final redis = Redis(RedisOptions(
   db: 1,
   connectTimeout: const Duration(seconds: 10),
   commandTimeout: const Duration(seconds: 5),
+  // Default is 3 (RESP3). If HELLO is unsupported, it falls back to RESP2.
   protocolVersion: 3,
+  // Keep RESP3 attribute wrappers instead of returning only wrapped data.
+  preserveResp3Attributes: false,
+  // Receive RESP3 push messages like invalidation notifications.
+  onPush: (push) {
+    print('push => ${push.items}');
+  },
   maxConnection: 10,
   idleTimeout: const Duration(seconds: 10),
   pipelineBatchSize: 256,
@@ -75,6 +82,14 @@ final redis = Redis(RedisOptions(
   },
 ));
 ```
+
+## RESP2 / RESP3 behavior
+
+- Default protocol is RESP3 (`protocolVersion: 3`).
+- On servers that do not support `HELLO`, the client automatically downgrades to RESP2 for that connection.
+- You can force RESP2 by setting `protocolVersion: 2`.
+- RESP3 push frames are available via `RedisOptions.onPush`.
+- RESP3 attributes are parsed; set `preserveResp3Attributes: true` to keep wrappers in command replies.
 
 ## Core API Coverage
 

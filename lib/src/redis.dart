@@ -8,7 +8,6 @@ import 'package:ioredis/ioredis.dart';
 import 'package:ioredis/src/default.dart';
 import 'package:ioredis/src/redis_connection_pool.dart';
 import 'package:ioredis/src/redis_multi_command.dart';
-import 'package:ioredis/src/redis_response.dart';
 
 class Redis {
   Redis([RedisOptions? opt]) {
@@ -342,6 +341,9 @@ class Redis {
     if (result is List) {
       return result.cast<String>();
     }
+    if (result is Set) {
+      return result.map((item) => item as String).toList();
+    }
     throw RedisProtocolError(
         'Unexpected response for SMEMBERS: ${result.runtimeType}');
   }
@@ -365,7 +367,26 @@ class Redis {
     }
     final result = await sendCommand(command);
     if (result is List) {
-      return result.cast<String>();
+      if (withScores &&
+          result.isNotEmpty &&
+          result.every(
+              (item) => item is List && item.length == 2 && item[0] != null)) {
+        final values = <String>[];
+        for (final item in result.cast<List<dynamic>>()) {
+          values.add(item[0].toString());
+          values.add(item[1].toString());
+        }
+        return values;
+      }
+      return result.map((item) => item.toString()).toList();
+    }
+    if (result is Map && withScores) {
+      final values = <String>[];
+      for (final entry in result.entries) {
+        values.add(entry.key.toString());
+        values.add(entry.value.toString());
+      }
+      return values;
     }
     throw RedisProtocolError(
         'Unexpected response for ZRANGE: ${result.runtimeType}');

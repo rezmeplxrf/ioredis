@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:ioredis/src/redis_response.dart';
@@ -42,6 +43,13 @@ void main() {
       final result = RedisResponse.transform(resp);
       expect(result, isA<int>());
       expect(result, -7);
+    });
+
+    test('parses empty simple string as empty string', () {
+      const resp = '+\r\n';
+      final result = RedisResponse.transform(resp);
+      expect(result, isA<String>());
+      expect(result, equals(''));
     });
 
     test('parses nested arrays containing integers', () {
@@ -128,6 +136,7 @@ void main() {
     test('byte parser supports RESP3 bool/double/null', () {
       final payload = Uint8List.fromList(<int>[
         35, 116, 13, 10, // #t
+        35, 102, 13, 10, // #f
         44, 51, 46, 49, 52, 13, 10, // ,3.14
         95, 13, 10, // _\r\n
       ]);
@@ -139,13 +148,27 @@ void main() {
         Uint8List.sublistView(payload, first.$2),
       );
       expect(second, isNotNull);
-      expect(second!.$1, closeTo(3.14, 0.0001));
+      expect(second!.$1, isFalse);
 
       final third = RedisResponse.tryParseBytesWithConsumed(
         Uint8List.sublistView(payload, first.$2 + second.$2),
       );
       expect(third, isNotNull);
-      expect(third!.$1, isNull);
+      expect(third!.$1, closeTo(3.14, 0.0001));
+
+      final fourth = RedisResponse.tryParseBytesWithConsumed(
+        Uint8List.sublistView(payload, first.$2 + second.$2 + third.$2),
+      );
+      expect(fourth, isNotNull);
+      expect(fourth!.$1, isNull);
+    });
+
+    test('rejects invalid RESP3 boolean token', () {
+      final payload = Uint8List.fromList(<int>[
+        35, 120, 13, 10, // #x
+      ]);
+      final parsed = RedisResponse.tryParseBytesWithConsumed(payload);
+      expect(parsed, isNull);
     });
 
     test('byte parser supports RESP3 bigint', () {
@@ -173,6 +196,70 @@ void main() {
       final attributed = parsed.$1 as RedisAttributedData;
       expect(attributed.attributes['meta'], equals('v1'));
       expect(attributed.data, equals('OK'));
+    });
+
+    test('byte parser supports streamed RESP3 blob strings', () {
+      final payload = Uint8List.fromList(<int>[
+        36, 63, 13, 10, // $?
+        59, 53, 13, 10, // ;5
+        ...'hello'.codeUnits,
+        13, 10,
+        59, 49, 13, 10, // ;1
+        ...'!'.codeUnits,
+        13, 10,
+        59, 48, 13, 10, // ;0
+        13, 10,
+      ]);
+      final parsed = RedisResponse.tryParseBytesWithConsumed(payload);
+      expect(parsed, isNotNull);
+      expect(parsed!.$1, isA<RedisBulkData>());
+      final bulk = parsed.$1 as RedisBulkData;
+      expect(utf8.decode(bulk.bytes), equals('hello!'));
+    });
+
+    test('byte parser supports streamed RESP3 aggregates', () {
+      final arrayPayload = Uint8List.fromList(<int>[
+        42, 63, 13, 10, // *?
+        43, 97, 13, 10, // +a
+        58, 49, 13, 10, // :1
+        46, 13, 10, // .
+      ]);
+      final arrayParsed = RedisResponse.tryParseBytesWithConsumed(arrayPayload);
+      expect(arrayParsed, isNotNull);
+      expect(arrayParsed!.$1, equals(<dynamic>['a', 1]));
+
+      final mapPayload = Uint8List.fromList(<int>[
+        37, 63, 13, 10, // %?
+        43, 107, 13, 10, // +k
+        43, 118, 13, 10, // +v
+        46, 13, 10, // .
+      ]);
+      final mapParsed = RedisResponse.tryParseBytesWithConsumed(mapPayload);
+      expect(mapParsed, isNotNull);
+      expect(mapParsed!.$1, equals(<dynamic, dynamic>{'k': 'v'}));
+
+      final setPayload = Uint8List.fromList(<int>[
+        126, 63, 13, 10, // ~?
+        43, 120, 13, 10, // +x
+        43, 121, 13, 10, // +y
+        46, 13, 10, // .
+      ]);
+      final setParsed = RedisResponse.tryParseBytesWithConsumed(setPayload);
+      expect(setParsed, isNotNull);
+      expect(setParsed!.$1, equals(<dynamic>{'x', 'y'}));
+
+      final pushPayload = Uint8List.fromList(<int>[
+        62, 63, 13, 10, // >?
+        43, 109, 101, 115, 115, 97, 103, 101, 13, 10, // +message
+        43, 114, 111, 111, 109, 13, 10, // +room
+        43, 104, 105, 13, 10, // +hi
+        46, 13, 10, // .
+      ]);
+      final pushParsed = RedisResponse.tryParseBytesWithConsumed(pushPayload);
+      expect(pushParsed, isNotNull);
+      expect(pushParsed!.$1, isA<RedisPushData>());
+      final push = pushParsed.$1 as RedisPushData;
+      expect(push.items, equals(<dynamic>['message', 'room', 'hi']));
     });
   });
 
@@ -208,6 +295,25 @@ void main() {
         ['foo', 'bar'],
         'baz'
       ]);
+    });
+
+    test('parses streamed RESP3 array in string transformer', () async {
+      const payload = '*?\r\n+a\r\n:1\r\n.\r\n';
+      final values = await Stream<String>.value(payload)
+          .transform(redisResponseTransformer)
+          .toList();
+      expect(values.length, 1);
+      expect(values.first, equals(<dynamic>['a', 1]));
+    });
+
+    test('parses streamed RESP3 blob string in string transformer', () async {
+      const part1 = r'$?' '\r\n' ';5' '\r\n' 'hello' '\r\n';
+      const part2 = ';1' '\r\n' '!' '\r\n' ';0' '\r\n' '\r\n';
+      final values = await Stream<String>.fromIterable(<String>[part1, part2])
+          .transform(redisResponseTransformer)
+          .toList();
+      expect(values.length, 1);
+      expect(values.first, equals('hello!'));
     });
   });
 

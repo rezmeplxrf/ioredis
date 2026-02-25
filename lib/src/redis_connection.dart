@@ -9,7 +9,6 @@ import 'package:collection/collection.dart';
 import 'package:ioredis/ioredis.dart';
 import 'package:ioredis/src/default.dart';
 import 'package:ioredis/src/redis_message_encoder.dart';
-import 'package:ioredis/src/redis_response.dart';
 import 'package:ioredis/src/transformer.dart';
 
 class _PendingCommand {
@@ -80,6 +79,7 @@ class RedisConnection {
 
   bool _isReconnecting = false;
   Future<void> Function()? onReconnect;
+  int _activeProtocolVersion = 3;
 
   /// Get current connection status
   String getStatus() => status.name;
@@ -149,6 +149,7 @@ class RedisConnection {
     _subscription = _stream?.listen(
       (dynamic packet) {
         try {
+          _emitPush(packet);
           final packetPayload = packet is RedisPushData ? packet.items : packet;
           if (packetPayload is List) {
             final textPacket = _normalizeReply(packetPayload, rawReply: false);
@@ -490,6 +491,7 @@ class RedisConnection {
   Future<dynamic> _hello() async {
     final protocolVersion = option.protocolVersion;
     if (protocolVersion == 2) {
+      _activeProtocolVersion = 2;
       return null;
     }
 
@@ -503,8 +505,17 @@ class RedisConnection {
       ]);
     }
 
-    final result = await _sendCommand(command, allowWhileConnecting: true);
-    return result;
+    try {
+      final result = await _sendCommand(command, allowWhileConnecting: true);
+      _activeProtocolVersion = protocolVersion;
+      return result;
+    } on RedisCommandError catch (error) {
+      if (protocolVersion == 3 && _isHelloUnsupported(error)) {
+        _activeProtocolVersion = 2;
+        return null;
+      }
+      rethrow;
+    }
   }
 
   /// Select database index
@@ -564,7 +575,7 @@ class RedisConnection {
       await _hello();
 
       /// If username is provided, we need to login before calling other commands
-      if (option.protocolVersion == 2) {
+      if (_activeProtocolVersion == 2) {
         await _login();
       }
 
@@ -603,6 +614,11 @@ class RedisConnection {
     if (cb != null) {
       cb(event);
     }
+  }
+
+  bool _isHelloUnsupported(RedisCommandError error) {
+    final upper = error.message.toUpperCase();
+    return upper.contains('UNKNOWN COMMAND') && upper.contains('HELLO');
   }
 
   bool _isUnsolicitedPacket(dynamic packet) {
@@ -768,8 +784,20 @@ class RedisConnection {
       );
     }
     if (packet is RedisAttributedData) {
-      // Keep response compatibility for existing APIs by returning the wrapped data.
-      return _normalizeReply(packet.data, rawReply: rawReply);
+      final normalizedAttributes = packet.attributes.map(
+        (key, value) => MapEntry(
+          _normalizeReply(key, rawReply: rawReply),
+          _normalizeReply(value, rawReply: rawReply),
+        ),
+      );
+      final normalizedData = _normalizeReply(packet.data, rawReply: rawReply);
+      if (option.preserveResp3Attributes) {
+        return RedisAttributedData(
+          attributes: normalizedAttributes,
+          data: normalizedData,
+        );
+      }
+      return normalizedData;
     }
     if (packet is Map<dynamic, dynamic>) {
       return packet.map(
@@ -790,5 +818,19 @@ class RedisConnection {
           .toList();
     }
     return packet;
+  }
+
+  void _emitPush(dynamic packet) {
+    if (packet is! RedisPushData) {
+      return;
+    }
+    final callback = option.onPush;
+    if (callback == null) {
+      return;
+    }
+    final normalized = _normalizeReply(packet, rawReply: false);
+    if (normalized is RedisPushData) {
+      callback(normalized);
+    }
   }
 }

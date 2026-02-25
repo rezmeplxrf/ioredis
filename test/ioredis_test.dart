@@ -126,13 +126,17 @@ void main() {
       );
     });
 
+    test('default protocolVersion is RESP3', () {
+      final options = RedisOptions();
+      expect(options.protocolVersion, equals(3));
+    });
+
     test('protocolVersion 3 connection works', () async {
       final resp3 = Redis(RedisOptions(
         host: commonOptions.host,
         port: commonOptions.port,
         password: commonOptions.password,
         db: commonOptions.db,
-        protocolVersion: 3,
       ));
       addTearDown(() async {
         await resp3.disconnect();
@@ -157,7 +161,6 @@ void main() {
         port: commonOptions.port,
         password: commonOptions.password,
         db: commonOptions.db,
-        protocolVersion: 3,
       ));
       final pub = sub.duplicate();
       addTearDown(() async {
@@ -183,6 +186,98 @@ void main() {
         await sub.unsubscribe('resp3:room');
       } catch (e) {
         if (_isUnknownCommand(e, 'HELLO')) {
+          return;
+        }
+        rethrow;
+      }
+    });
+
+    test('protocolVersion 3 SMEMBERS returns values without cast errors',
+        () async {
+      final resp3 = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+      ));
+      addTearDown(() async {
+        await resp3.disconnect();
+      });
+
+      try {
+        await resp3.delete('resp3:smembers');
+        await resp3.sadd('resp3:smembers', <String>['a', 'b']);
+        final values = await resp3.smembers('resp3:smembers');
+        expect(values.toSet(), equals(<String>{'a', 'b'}));
+      } catch (e) {
+        if (_isUnknownCommand(e, 'HELLO')) {
+          return;
+        }
+        rethrow;
+      }
+    });
+
+    test('protocolVersion 3 works when attribute preservation is enabled',
+        () async {
+      final resp3 = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        preserveResp3Attributes: true,
+      ));
+      addTearDown(() async {
+        await resp3.disconnect();
+      });
+
+      try {
+        final reply = await resp3.sendCommand(<String>['HELLO', '3']);
+        expect(reply, isA<Map<dynamic, dynamic>>());
+        expect((reply as Map<dynamic, dynamic>)['proto'], equals(3));
+      } catch (e) {
+        if (_isUnknownCommand(e, 'HELLO')) {
+          return;
+        }
+        rethrow;
+      }
+    });
+
+    test('protocolVersion 3 emits invalidate push via onPush', () async {
+      final pushes = <RedisPushData>[];
+      final tracked = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        onPush: pushes.add,
+      ));
+      final writer = tracked.duplicate();
+      addTearDown(() async {
+        await tracked.disconnect();
+        await writer.disconnect();
+      });
+
+      try {
+        await tracked
+            .sendCommand(<String>['CLIENT', 'TRACKING', 'ON', 'BCAST']);
+        await writer.set('resp3:invalidate:key', 'v1');
+        await tracked.get('resp3:invalidate:key');
+        await writer.set('resp3:invalidate:key', 'v2');
+
+        var sawInvalidate = false;
+        for (var i = 0; i < 20; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          sawInvalidate = pushes.any((push) =>
+              push.items.isNotEmpty && push.items.first == 'invalidate');
+          if (sawInvalidate) break;
+        }
+
+        expect(sawInvalidate, isTrue);
+        await tracked.sendCommand(<String>['CLIENT', 'TRACKING', 'OFF']);
+      } catch (e) {
+        if (_isUnknownCommand(e, 'HELLO') ||
+            _isUnknownCommand(e, 'TRACKING') ||
+            _isUnknownCommand(e, 'CLIENT')) {
           return;
         }
         rethrow;

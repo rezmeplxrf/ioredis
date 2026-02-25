@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:ioredis/src/redis_event.dart';
+import 'package:ioredis/src/redis_response.dart';
 import 'package:ioredis/src/redis_retry_policy.dart';
 
 class RedisOptions {
@@ -19,8 +20,10 @@ class RedisOptions {
     this.onError,
     this.maxConnection = 10,
     this.idleTimeout = const Duration(seconds: 10),
-    this.protocolVersion = 2,
+    this.protocolVersion = 3,
+    this.preserveResp3Attributes = false,
     this.onEvent,
+    this.onPush,
     this.pipelineBatchSize = 256,
     this.maxPendingCommands = 10000,
     this.tlsContext,
@@ -65,6 +68,9 @@ class RedisOptions {
   /// structured event callback for observability.
   void Function(RedisEvent event)? onEvent;
 
+  /// Callback for RESP3 push messages, including invalidation pushes.
+  void Function(RedisPushData push)? onPush;
+
   /// key prefix
   /// ```
   /// Redis fooRedis = new Redis(RedisOption(keyPrefix: 'foo'));
@@ -79,8 +85,13 @@ class RedisOptions {
   Duration idleTimeout;
 
   /// RESP protocol version.
-  /// 2 = RESP2 (default), 3 = RESP3 via HELLO.
+  /// 2 = RESP2, 3 = RESP3 via HELLO (default).
+  /// When set to 3, connection falls back to RESP2 if HELLO is unsupported.
   int protocolVersion;
+
+  /// When true, keep RESP3 attribute wrappers in command replies.
+  /// When false (default), only wrapped data is returned.
+  bool preserveResp3Attributes;
 
   /// max commands written in one pipeline batch.
   int pipelineBatchSize;
@@ -114,7 +125,9 @@ class RedisOptions {
       maxConnection: maxConnection,
       idleTimeout: idleTimeout,
       protocolVersion: protocolVersion,
+      preserveResp3Attributes: preserveResp3Attributes,
       onEvent: onEvent,
+      onPush: onPush,
       pipelineBatchSize: pipelineBatchSize,
       maxPendingCommands: maxPendingCommands,
       tlsContext: tlsContext,
