@@ -1,3 +1,5 @@
+import 'package:ioredis/src/redis_error.dart';
+
 enum RedisResponseConstant {
   ok('OK'),
   simpleString('+'),
@@ -115,7 +117,11 @@ class RedisResponse {
       case _CharCodes.plus:
         return toSimpleString(s);
       case _CharCodes.minus:
-        return toSimpleString(s);
+        final error = toSimpleString(s);
+        if (error == null) {
+          return RedisServerErrorReply('ERR empty error');
+        }
+        return RedisServerErrorReply(error);
       case _CharCodes.colon:
         return toSimpleString(s);
       case _CharCodes.dollar:
@@ -141,12 +147,17 @@ class RedisResponse {
 
     switch (firstChar) {
       case _CharCodes.plus:
-      case _CharCodes.minus:
       case _CharCodes.colon:
         final lineEnd = s.indexOf(_crlf, start);
         if (lineEnd == -1) return null;
         final value = s.substring(start + 1, lineEnd);
         return (value.isEmpty ? null : value, lineEnd + 2);
+
+      case _CharCodes.minus:
+        final errorLineEnd = s.indexOf(_crlf, start);
+        if (errorLineEnd == -1) return null;
+        final errorValue = s.substring(start + 1, errorLineEnd);
+        return (RedisServerErrorReply(errorValue), errorLineEnd + 2);
 
       case _CharCodes.dollar:
         final headerEnd = s.indexOf(_crlf, start);

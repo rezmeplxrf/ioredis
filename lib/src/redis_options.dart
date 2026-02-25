@@ -1,21 +1,28 @@
-class RedisOptions {
+import 'package:ioredis/src/redis_retry_policy.dart';
 
+class RedisOptions {
   RedisOptions({
     this.keyPrefix = '',
     this.host = '127.0.0.1',
     this.port = 6379,
     this.secure = false,
     this.connectTimeout = const Duration(seconds: 10),
+    this.commandTimeout,
     this.username,
     this.password,
     this.db = 0,
     this.retryStrategy,
+    this.retryPolicy,
     this.onError,
     this.maxConnection = 10,
     this.idleTimeout = const Duration(seconds: 10),
   });
+
   /// timeout value for socket connection
   final Duration connectTimeout;
+
+  /// default timeout value for each command request.
+  final Duration? commandTimeout;
 
   /// use secure socket
   final bool secure;
@@ -23,6 +30,9 @@ class RedisOptions {
   /// retry strategy defaults to
   /// `min(50 * times, 2000)`
   final Duration Function(int)? retryStrategy;
+
+  /// command retry policy for transient command failures.
+  final RedisRetryPolicy? retryPolicy;
 
   /// redis username
   final String? username;

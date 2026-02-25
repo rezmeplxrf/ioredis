@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:ioredis/ioredis.dart';
 import 'package:ioredis/src/default.dart';
@@ -26,6 +27,8 @@ class Redis {
   /// subscriber, publisher or normal set and get
   RedisType redisClientType = RedisType.normal;
 
+  final Random _retryRandom = Random();
+
   /// Set custom socket
   void setSocket(Socket socket) {
     connection.setSocket(socket);
@@ -42,6 +45,7 @@ class Redis {
   Future<void> disconnect() async {
     pool.dispose();
     await connection.disconnect();
+    redisClientType = RedisType.normal;
   }
 
   /// Duplicate new redis connection
@@ -55,11 +59,11 @@ class Redis {
   /// ```
   Future<dynamic> set(String key, String value,
       [String? option, dynamic optionValue]) async {
-    final val =
-        await sendCommand(getCommandToSetData(key, value, option, optionValue))
-            as String?;
+    final val = await sendCommand(
+      getCommandToSetData(key, value, option, optionValue),
+    ) as String?;
     if (!RedisResponse.ok(val)) {
-      throw Exception(val);
+      throw RedisProtocolError('SET expected OK but got: $val');
     }
   }
 
@@ -84,7 +88,8 @@ class Redis {
     if (result is List) {
       return result.cast<String?>();
     }
-    throw StateError('Unexpected response for MGET: ${result.runtimeType}');
+    throw RedisProtocolError(
+        'Unexpected response for MGET: ${result.runtimeType}');
   }
 
   /// Delete a key
@@ -92,10 +97,7 @@ class Redis {
   /// await redis.get('foo');
   /// ```
   Future<void> delete(String key) async {
-    await sendCommand(<String>[
-      'DEL',
-      _setPrefixInKeys(<String>[key]).first
-    ]);
+    await sendCommand(<String>['DEL', prefixedKey(key)]);
   }
 
   /// Delete multiple key
@@ -130,6 +132,11 @@ class Redis {
     return RedisMulti(this);
   }
 
+  /// command pipeline with batched writes and ordered responses.
+  RedisPipeline pipeline() {
+    return RedisPipeline(this);
+  }
+
   /// Subscribe to channel
   /// ```dart
   /// RedisSubscriber subscriber = await redis.subscribe('channel');
@@ -140,26 +147,66 @@ class Redis {
   /// ```
   Future<RedisSubscriber> subscribe(String channel) async {
     if (redisClientType == RedisType.publisher) {
-      throw Exception('cannot subscribe and publish on same connection');
+      throw RedisProtocolError(
+          'cannot subscribe and publish on same connection');
     }
     redisClientType = RedisType.subscriber;
 
-    final cb = RedisSubscriber(channel: channel);
-    connection.subscribeListeners.add(cb);
-    unawaited(sendCommand(<String>['SUBSCRIBE', channel]));
-    return cb;
+    final cb = RedisSubscriber(
+      channel: channel,
+      isPattern: false,
+      onUnsubscribe: () => unsubscribe(channel),
+    );
+    connection.addSubscriber(cb);
+    try {
+      await sendCommand(<String>['SUBSCRIBE', channel]);
+      return cb;
+    } catch (_) {
+      connection.removeSubscriber(channel, isPattern: false);
+      _refreshClientType();
+      rethrow;
+    }
   }
 
   Future<RedisSubscriber> psubscribe(String pattern) async {
     if (redisClientType == RedisType.publisher) {
-      throw Exception('cannot subscribe and publish on same connection');
+      throw RedisProtocolError(
+          'cannot subscribe and publish on same connection');
     }
     redisClientType = RedisType.subscriber;
 
-    final cb = RedisSubscriber(channel: pattern);
-    connection.subscribeListeners.add(cb);
-    unawaited(sendCommand(<String>['PSUBSCRIBE', pattern]));
-    return cb;
+    final cb = RedisSubscriber(
+      channel: pattern,
+      isPattern: true,
+      onUnsubscribe: () => punsubscribe(pattern),
+    );
+    connection.addSubscriber(cb);
+    try {
+      await sendCommand(<String>['PSUBSCRIBE', pattern]);
+      return cb;
+    } catch (_) {
+      connection.removeSubscriber(pattern, isPattern: true);
+      _refreshClientType();
+      rethrow;
+    }
+  }
+
+  Future<void> unsubscribe([String? channel]) async {
+    if (channel != null) {
+      await sendCommand(<String>['UNSUBSCRIBE', channel]);
+    } else {
+      await sendCommand(<String>['UNSUBSCRIBE']);
+    }
+    _refreshClientType();
+  }
+
+  Future<void> punsubscribe([String? pattern]) async {
+    if (pattern != null) {
+      await sendCommand(<String>['PUNSUBSCRIBE', pattern]);
+    } else {
+      await sendCommand(<String>['PUNSUBSCRIBE']);
+    }
+    _refreshClientType();
   }
 
   /// Publish message to a channel
@@ -168,28 +215,51 @@ class Redis {
   /// ```
   Future<void> publish(String channel, String message) async {
     if (redisClientType == RedisType.subscriber) {
-      throw Exception('cannot subscribe and publish on same connection');
+      throw RedisProtocolError(
+          'cannot subscribe and publish on same connection');
     }
     redisClientType = RedisType.publisher;
     await sendCommand(<String>['PUBLISH', channel, message]);
   }
 
   /// send command to connection
-  Future<dynamic> sendCommand(List<String> commandList) async {
-    if (!connection.isBusy || redisClientType != RedisType.normal) {
-      return connection.sendCommand(commandList);
+  Future<dynamic> sendCommand(
+    List<String> commandList, {
+    Duration? timeout,
+    RedisRetryPolicy? retryPolicy,
+  }) async {
+    final policy = retryPolicy ?? option.retryPolicy;
+    var attempt = 1;
+
+    while (true) {
+      try {
+        if (!connection.isBusy || redisClientType != RedisType.normal) {
+          return await connection.sendCommand(commandList, timeout: timeout);
+        }
+        return await pool.sendCommand(commandList, timeout: timeout);
+      } catch (error) {
+        final mapped = RedisErrorMapper.map(error, command: commandList);
+        if (policy == null || !policy.canRetry(mapped, attempt, commandList)) {
+          throw mapped;
+        }
+        await Future<void>.delayed(policy.nextDelay(attempt, _retryRandom));
+        attempt++;
+      }
     }
-    return pool.sendCommand(commandList);
+  }
+
+  /// send pipeline on the main connection using a single batched write.
+  Future<List<dynamic>> sendPipeline(
+    List<List<String>> commands, {
+    Duration? timeout,
+  }) async {
+    return connection.sendPipeline(commands, timeout: timeout);
   }
 
   /// get command to set data to redis
   List<String> getCommandToSetData(String key, String value,
       [String? option, dynamic optionValue]) {
-    final command = <String>[
-      'SET',
-      _setPrefixInKeys(<String>[key]).first,
-      value
-    ];
+    final command = <String>['SET', prefixedKey(key), value];
     if (option != null && optionValue != null) {
       command.addAll(<String>[option.toUpperCase(), optionValue.toString()]);
     }
@@ -198,18 +268,28 @@ class Redis {
 
   /// get command to get data from redis
   List<String> getCommandToGetData(String key) {
-    final command = <String>[
-      'GET',
-      _setPrefixInKeys(<String>[key]).first
-    ];
+    final command = <String>['GET', prefixedKey(key)];
     return command;
+  }
+
+  String prefixedKey(String key) {
+    if (option.keyPrefix.isEmpty) {
+      return key;
+    }
+    return '${option.keyPrefix}:$key';
   }
 
   /// setting keys prefix before setting or getting values
   List<String> _setPrefixInKeys(List<String> keys) {
-    return keys
-        .map((k) => option.keyPrefix.isNotEmpty ? '${option.keyPrefix}:$k' : k)
-        .toList();
+    return keys.map(prefixedKey).toList();
+  }
+
+  void _refreshClientType() {
+    if (connection.subscribeListeners.isNotEmpty) {
+      redisClientType = RedisType.subscriber;
+    } else {
+      redisClientType = RedisType.normal;
+    }
   }
 
   /// Get JSON value
@@ -245,7 +325,7 @@ class Redis {
       jsonString
     ]) as String?;
     if (!RedisResponse.ok(val)) {
-      throw Exception(val);
+      throw RedisProtocolError('JSON.SET expected OK but got: $val');
     }
   }
 
@@ -262,6 +342,8 @@ class Redis {
     String script, {
     List<String> keys = const <String>[],
     List<dynamic> args = const <dynamic>[],
+    Duration? timeout,
+    RedisRetryPolicy? retryPolicy,
   }) async {
     final prefixedKeys = _setPrefixInKeys(keys);
     final command = <String>[
@@ -271,6 +353,6 @@ class Redis {
       ...prefixedKeys,
       ...args.map((arg) => arg.toString()),
     ];
-    return sendCommand(command);
+    return sendCommand(command, timeout: timeout, retryPolicy: retryPolicy);
   }
 }

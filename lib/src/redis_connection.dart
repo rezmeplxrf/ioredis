@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:ioredis/ioredis.dart';
@@ -9,6 +10,22 @@ import 'package:ioredis/src/default.dart';
 import 'package:ioredis/src/redis_message_encoder.dart';
 import 'package:ioredis/src/redis_response.dart';
 import 'package:ioredis/src/transformer.dart';
+
+class _PendingCommand {
+  _PendingCommand({
+    required this.command,
+    required this.completer,
+  });
+
+  final List<String> command;
+  final Completer<dynamic> completer;
+  Timer? timer;
+
+  void dispose() {
+    timer?.cancel();
+    timer = null;
+  }
+}
 
 class RedisConnection {
   RedisConnection([RedisOptions? opt]) {
@@ -36,8 +53,7 @@ class RedisConnection {
   int _totalRetry = 0;
 
   /// Queue of pending command responses.
-  final Queue<Completer<dynamic>> _pendingResponses =
-      Queue<Completer<dynamic>>();
+  final Queue<_PendingCommand> _pendingResponses = Queue<_PendingCommand>();
 
   /// Serializer to send the command to redis
   final RedisMessageEncoder _encoder = RedisMessageEncoder();
@@ -97,10 +113,8 @@ class RedisConnection {
     }
   }
 
-  /// Listen response from redis and sent to completer ro callback.
-  /// onDone callback is use to listen redis disconnect to reconnect
   /// Listen response from redis and sent to completer or callback.
-  /// onDone callback is used to listen for redis disconnect to reconnect
+  /// onDone callback is used to listen for redis disconnect to reconnect.
   void _listenResponseFromRedis() {
     final existingSubscription = _subscription;
     if (existingSubscription != null) {
@@ -117,13 +131,25 @@ class RedisConnection {
             final type = packet[0] as String;
             final pmessage = type == 'pmessage';
             final rmessage = type == 'message';
+            final unsubscribe = type == 'unsubscribe';
+            final punsubscribe = type == 'punsubscribe';
             final isMessage = rmessage || pmessage;
-            if (isMessage && packet.length >= 3) {
+            if (isMessage &&
+                ((pmessage && packet.length >= 4) ||
+                    (!pmessage && packet.length >= 3))) {
               final channel = packet[pmessage ? 2 : 1] as String;
               final message = packet[pmessage ? 3 : 2] as String?;
               final cb = _findSubscribeListener(
-                  pmessage ? packet[1] as String : channel);
+                pmessage ? packet[1] as String : channel,
+                isPattern: pmessage,
+              );
               cb?.onMessage?.call(channel, message);
+            }
+            if (unsubscribe && packet.length >= 2) {
+              removeSubscriber(packet[1] as String, isPattern: false);
+            }
+            if (punsubscribe && packet.length >= 2) {
+              removeSubscriber(packet[1] as String, isPattern: true);
             }
           }
         } catch (e, st) {
@@ -138,17 +164,17 @@ class RedisConnection {
         }
       },
       onError: (Object error, StackTrace st) async {
+        final mapped = RedisErrorMapper.map(error);
         _setDisconnectedState();
-        _failAllPending(error);
-        _throwSafeError(error);
+        _failAllPending(mapped);
+        _throwSafeError(mapped);
         unawaited(_reconnect());
       },
       onDone: () async {
+        final disconnected = RedisConnectionError('Redis disconnected');
         _setDisconnectedState();
-        _failAllPending(Exception('Redis Disconnected'));
-        _throwSafeError(
-          Exception('Redis Disconnected'),
-        );
+        _failAllPending(disconnected);
+        _throwSafeError(disconnected);
         unawaited(_reconnect());
       },
     );
@@ -159,7 +185,8 @@ class RedisConnection {
     _shouldReconnect = false;
     _shouldThrowErrorOnConnection = false;
     status = RedisConnectionStatus.disconnected;
-    _failAllPending(Exception('Redis connection closed'));
+    _failAllPending(RedisConnectionError('Redis connection closed'));
+    subscribeListeners.clear();
     final existingSubscription = _subscription;
     if (existingSubscription != null) {
       await existingSubscription.cancel();
@@ -173,7 +200,8 @@ class RedisConnection {
     _shouldReconnect = false;
     _shouldThrowErrorOnConnection = false;
     status = RedisConnectionStatus.disconnected;
-    _failAllPending(Exception('Redis connection destroyed'));
+    _failAllPending(RedisConnectionError('Redis connection destroyed'));
+    subscribeListeners.clear();
     final existingSubscription = _subscription;
     if (existingSubscription != null) {
       unawaited(existingSubscription.cancel());
@@ -207,52 +235,119 @@ class RedisConnection {
     }
   }
 
-  /// Send redis command
-  /// ```
-  /// await redis.sendCommand(['SET', 'foo', 'bar']);
-  /// await redis.sendCommand(['GET', 'foo']);
-  /// ```
-  Future<dynamic> _sendCommand(List<String> commandList) async {
+  /// Send redis command.
+  Future<dynamic> _sendCommand(
+    List<String> commandList, {
+    Duration? timeout,
+  }) async {
     if (status != RedisConnectionStatus.connected || _redisSocket == null) {
       await connect();
     }
 
     final socket = _redisSocket;
     if (socket == null || status != RedisConnectionStatus.connected) {
-      throw StateError('Redis connection is not available');
+      throw RedisConnectionError('Redis connection is not available');
     }
 
-    final completer = Completer<dynamic>();
-    _pendingResponses.addLast(completer);
+    final pending = _registerPending(commandList, timeout: timeout);
     try {
       socket.add(_encoder.encode(commandList));
-    } catch (_) {
-      _pendingResponses.removeLast();
-      rethrow;
+    } catch (error) {
+      _pendingResponses.remove(pending);
+      pending.dispose();
+      throw RedisErrorMapper.map(error, command: commandList);
     }
 
-    return completer.future;
+    return pending.completer.future;
   }
 
-  /// Send redis command
-  /// ```
-  /// await redis.sendCommand(['SET', 'foo', 'bar']);
-  /// await redis.sendCommand(['GET', 'foo']);
-  /// ```
-  Future<dynamic> sendCommand(List<String> commandList) async {
+  /// Send redis command.
+  Future<dynamic> sendCommand(
+    List<String> commandList, {
+    Duration? timeout,
+  }) async {
     _inFlight++;
     try {
-      final value = await _sendCommand(commandList);
+      final value = await _sendCommand(commandList, timeout: timeout);
       return value;
     } finally {
       _inFlight--;
     }
   }
 
+  /// Sends pipelined commands in a single socket write.
+  Future<List<dynamic>> sendPipeline(
+    List<List<String>> commands, {
+    Duration? timeout,
+  }) async {
+    if (commands.isEmpty) {
+      return <dynamic>[];
+    }
+
+    _inFlight += commands.length;
+    try {
+      if (status != RedisConnectionStatus.connected || _redisSocket == null) {
+        await connect();
+      }
+
+      final socket = _redisSocket;
+      if (socket == null || status != RedisConnectionStatus.connected) {
+        throw RedisConnectionError('Redis connection is not available');
+      }
+
+      final pending = <_PendingCommand>[];
+      final output = BytesBuilder(copy: false);
+      for (final command in commands) {
+        output.add(_encoder.encode(command));
+        pending.add(_registerPending(command, timeout: timeout));
+      }
+
+      try {
+        socket.add(output.takeBytes());
+      } catch (error) {
+        for (final item in pending) {
+          _pendingResponses.remove(item);
+          item.dispose();
+          if (!item.completer.isCompleted) {
+            item.completer.completeError(
+              RedisErrorMapper.map(error, command: item.command),
+            );
+          }
+        }
+      }
+
+      return Future.wait<dynamic>(
+        pending.map((item) => item.completer.future),
+      );
+    } finally {
+      _inFlight -= commands.length;
+    }
+  }
+
   /// Get subscribe listener callback related to the channel or pattern
-  RedisSubscriber? _findSubscribeListener(String channel) {
-    final cb = subscribeListeners.firstWhereOrNull((e) => e.channel == channel);
+  RedisSubscriber? _findSubscribeListener(String channel,
+      {required bool isPattern}) {
+    final cb = subscribeListeners.firstWhereOrNull(
+      (e) => e.channel == channel && e.isPattern == isPattern,
+    );
     return cb;
+  }
+
+  void addSubscriber(RedisSubscriber subscriber) {
+    removeSubscriber(subscriber.channel, isPattern: subscriber.isPattern);
+    subscribeListeners.add(subscriber);
+  }
+
+  void removeSubscriber(String channel, {required bool isPattern}) {
+    subscribeListeners.removeWhere(
+      (listener) =>
+          listener.channel == channel && listener.isPattern == isPattern,
+    );
+  }
+
+  void removeAllSubscribers({required bool isPattern}) {
+    subscribeListeners
+        .removeWhere((listener) => listener.isPattern == isPattern);
   }
 
   /// Login to redis
@@ -265,7 +360,7 @@ class RedisConnection {
           : <String>['AUTH', password];
       final result = await _sendCommand(commands) as String?;
       if (!RedisResponse.ok(result)) {
-        throw Exception(result ?? 'AUTH failed');
+        throw RedisAuthError(result ?? 'AUTH failed', command: commands);
       }
       return result;
     }
@@ -273,10 +368,11 @@ class RedisConnection {
 
   /// Select database index
   Future<dynamic> _selectDatabaseIndex() async {
-    final result =
-        await _sendCommand(<String>['SELECT', option.db.toString()]) as String?;
+    final command = <String>['SELECT', option.db.toString()];
+    final result = await _sendCommand(command) as String?;
     if (!RedisResponse.ok(result)) {
-      throw Exception(result ?? 'SELECT failed');
+      throw RedisCommandError('SELECT', result ?? 'SELECT failed',
+          command: command);
     }
     return result;
   }
@@ -333,15 +429,14 @@ class RedisConnection {
       await _selectDatabaseIndex();
     } on SocketException catch (error) {
       _setDisconnectedState();
-      _throwSafeError(
-        Exception(error.message),
-      );
+      final mapped = RedisConnectionError(error.message, cause: error);
+      _throwSafeError(mapped);
       if (delayOnFailure) {
         final retryDelay = option.retryStrategy?.call(_totalRetry) ??
             Duration(milliseconds: min(_totalRetry * 50, 2000));
         await Future<void>.delayed(retryDelay);
       }
-      rethrow;
+      throw mapped;
     }
   }
 
@@ -357,17 +452,66 @@ class RedisConnection {
     if (_pendingResponses.isEmpty) {
       return;
     }
-    final completer = _pendingResponses.removeFirst();
-    if (!completer.isCompleted) {
-      completer.complete(packet);
+    final pending = _pendingResponses.removeFirst();
+    pending.dispose();
+    if (pending.completer.isCompleted) {
+      return;
     }
+
+    if (packet is RedisServerErrorReply) {
+      pending.completer.completeError(
+        RedisErrorMapper.fromServerError(packet.message,
+            command: pending.command),
+      );
+      return;
+    }
+
+    pending.completer.complete(packet);
+  }
+
+  _PendingCommand _registerPending(
+    List<String> command, {
+    Duration? timeout,
+  }) {
+    final completer = Completer<dynamic>();
+    final entry = _PendingCommand(
+      command: List<String>.from(command),
+      completer: completer,
+    );
+
+    final effectiveTimeout = timeout ?? option.commandTimeout;
+    if (effectiveTimeout != null) {
+      entry.timer = Timer(effectiveTimeout, () {
+        final removed = _pendingResponses.remove(entry);
+        if (!removed || entry.completer.isCompleted) {
+          return;
+        }
+
+        entry.completer.completeError(
+          RedisTimeoutError(timeout: effectiveTimeout, command: command),
+        );
+        entry.dispose();
+
+        _setDisconnectedState();
+        _failAllPending(
+          RedisConnectionError(
+            'Connection reset after command timeout',
+          ),
+        );
+        unawaited(_reconnect());
+      });
+    }
+
+    _pendingResponses.addLast(entry);
+    return entry;
   }
 
   void _failAllPending(Object error) {
     while (_pendingResponses.isNotEmpty) {
-      final completer = _pendingResponses.removeFirst();
-      if (!completer.isCompleted) {
-        completer.completeError(error);
+      final pending = _pendingResponses.removeFirst();
+      pending.dispose();
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(error);
       }
     }
   }

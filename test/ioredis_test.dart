@@ -136,6 +136,53 @@ void main() {
       expect(await chat2.future.timeout(const Duration(seconds: 2)), 'hello');
     });
 
+    test('unsubscribe API cleans listener', () async {
+      final sub = Redis(commonOptions);
+      addTearDown(() async {
+        await sub.disconnect();
+      });
+
+      final listener = await sub.subscribe('cleanup_room');
+      final received = Completer<String?>();
+      listener.onMessage = (channel, message) {
+        if (channel == 'cleanup_room' && !received.isCompleted) {
+          received.complete(message);
+        }
+      };
+
+      await sub.unsubscribe('cleanup_room');
+      expect(sub.connection.subscribeListeners, isEmpty);
+
+      final pub = sub.duplicate();
+      addTearDown(() async {
+        await pub.disconnect();
+      });
+      await pub.publish('cleanup_room', 'should_not_arrive');
+
+      await expectLater(
+        received.future.timeout(const Duration(milliseconds: 250)),
+        throwsA(isA<TimeoutException>()),
+      );
+    });
+
+    test('explicit command timeout throws RedisTimeoutError', () async {
+      final timeoutRedis = Redis(commonOptions);
+      addTearDown(() async {
+        await timeoutRedis.disconnect();
+      });
+
+      await expectLater(
+        timeoutRedis.sendCommand(
+          <String>['BLPOP', 'timeout_never_key', '0'],
+          timeout: const Duration(milliseconds: 120),
+        ),
+        throwsA(isA<RedisTimeoutError>()),
+      );
+
+      await timeoutRedis.set('timeout_recovered', 'ok');
+      expect(await timeoutRedis.get('timeout_recovered'), 'ok');
+    });
+
     test('MGET', () async {
       await redis.set('A', '-AA');
       await redis.set('B', '+BB');
@@ -383,6 +430,62 @@ void main() {
 
       final second = await tx.exec();
       expect(second, isEmpty);
+    });
+
+    test('pipeline batches writes and keeps response order', () async {
+      final result = redis.pipeline()
+        ..set('pipe_k1', 'v1')
+        ..set('pipe_k2', 'v2')
+        ..get('pipe_k1')
+        ..get('pipe_k2');
+      final values = await result.exec();
+      expect(values[0], 'OK');
+      expect(values[1], 'OK');
+      expect(values[2], 'v1');
+      expect(values[3], 'v2');
+    });
+
+    test('pipeline respects key prefix exactly once', () async {
+      final prefixed = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        keyPrefix: 'pipepref',
+      ));
+      addTearDown(() async {
+        await prefixed.disconnect();
+      });
+
+      await (prefixed.pipeline()
+            ..set('k1', 'v1')
+            ..get('k1'))
+          .exec();
+
+      expect(await redis.get('pipepref:k1'), 'v1');
+      expect(await redis.get('pipepref:pipepref:k1'), isNull);
+    });
+
+    test('retry policy honors max attempts', () async {
+      var retriesInvoked = 0;
+      final retryPolicy = RedisRetryPolicy(
+        maxAttempts: 3,
+        initialDelay: Duration.zero,
+        maxDelay: Duration.zero,
+        shouldRetry: (error, attempt, command) {
+          retriesInvoked++;
+          return true;
+        },
+      );
+
+      await expectLater(
+        redis.sendCommand(
+          <String>['DOES_NOT_EXIST_COMMAND'],
+          retryPolicy: retryPolicy,
+        ),
+        throwsA(isA<RedisCommandError>()),
+      );
+      expect(retriesInvoked, 2);
     });
 
     test('special Redis protocol characters in values', () async {

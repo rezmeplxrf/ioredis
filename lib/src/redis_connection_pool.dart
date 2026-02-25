@@ -26,13 +26,13 @@ class RedisConnectionPool {
   int _nextConnectionId = 1;
 
   /// Send command to connection
-  Future<dynamic> sendCommand(List<String> commandList) {
+  Future<dynamic> sendCommand(List<String> commandList, {Duration? timeout}) {
     /// If there is idle connection use idle connection
     final idleConnection = _getIdleConnection();
     if (idleConnection != null) {
       // reset to prevent destroying, since connection is not idle anymore;
       _resetTimer(idleConnection.key);
-      return idleConnection.value.sendCommand(commandList);
+      return idleConnection.value.sendCommand(commandList, timeout: timeout);
     }
 
     /// If no idle connection create new connection if not over maxConnection yet.
@@ -42,7 +42,7 @@ class RedisConnectionPool {
       _poolConnections[connId] = conn;
       // reset to prevent destroying, since connection is not idle anymore;
       _resetTimer(connId);
-      return conn.sendCommand(commandList);
+      return conn.sendCommand(commandList, timeout: timeout);
     }
 
     /// If no idle connection and not able to create new connection,
@@ -50,11 +50,11 @@ class RedisConnectionPool {
     final randomConnection = _getRandomConnection();
     if (randomConnection != null) {
       _resetTimer(randomConnection.key);
-      return randomConnection.value.sendCommand(commandList);
+      return randomConnection.value.sendCommand(commandList, timeout: timeout);
     }
 
     /// If there is no connection with connected state, use mainConnection
-    return mainConnection.sendCommand(commandList);
+    return mainConnection.sendCommand(commandList, timeout: timeout);
   }
 
   /// get not busy connection with connected state to send command
