@@ -199,8 +199,10 @@ class RedisConnection {
           );
         }
 
-        // RESP3 pushes and Pub/Sub pushes are not command responses.
-        if (!_isPush(packet) && !_isPubSubPush(packet)) {
+        // Do not consume unsolicited pushes as command responses.
+        // RESP3 subscribe/unsubscribe acknowledgements can arrive as pushes and
+        // must still complete the pending command future.
+        if (!_isUnsolicitedPacket(packet)) {
           _completeNextPending(packet);
         }
       },
@@ -595,16 +597,19 @@ class RedisConnection {
     }
   }
 
-  bool _isPubSubPush(dynamic packet) {
+  bool _isUnsolicitedPacket(dynamic packet) {
     final type = _packetType(packet);
     if (type == null) {
       return false;
     }
-    return type == 'message' || type == 'pmessage' || type == 'smessage';
+    return _isUnsolicitedPushType(type);
   }
 
-  bool _isPush(dynamic packet) {
-    return packet is RedisPushData;
+  bool _isUnsolicitedPushType(String type) {
+    return type == 'message' ||
+        type == 'pmessage' ||
+        type == 'smessage' ||
+        type == 'invalidate';
   }
 
   String? _packetType(dynamic packet) {

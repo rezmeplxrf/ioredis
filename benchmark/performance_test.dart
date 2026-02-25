@@ -1,125 +1,167 @@
+import 'dart:typed_data';
+
 import 'package:ioredis/src/redis_message_encoder.dart';
 import 'package:ioredis/src/redis_response.dart';
+import 'package:ioredis/src/transformer.dart';
 
-void main() {
-  // Performance benchmark for the optimized Redis response parsing
+Future<void> main() async {
   benchmarkResponseParsing();
+  await benchmarkTransformer();
   benchmarkMessageEncoding();
 }
 
 void benchmarkResponseParsing() {
-  print('=== Redis Response Parsing Benchmark ===');
+  print('=== RESP Parsing Benchmark ===');
 
-  // Test data
-  const simpleString = '+OK\r\n';
-  const bulkString = '\$5\r\nhello\r\n';
-  const integerResponse = ':42\r\n';
-  const arrayResponse = '*3\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n\$3\r\nbaz\r\n';
-  const errorResponse = '-Error message\r\n';
+  final cases = <({String name, Uint8List payload, int iterations})>[
+    (
+      name: 'simple string +OK',
+      payload: Uint8List.fromList('+OK\r\n'.codeUnits),
+      iterations: 300000,
+    ),
+    (
+      name: 'integer :42',
+      payload: Uint8List.fromList(':42\r\n'.codeUnits),
+      iterations: 300000,
+    ),
+    (
+      name: 'bulk \$5 hello',
+      payload: Uint8List.fromList('\$5\r\nhello\r\n'.codeUnits),
+      iterations: 250000,
+    ),
+    (
+      name: 'array [foo,bar,baz]',
+      payload: Uint8List.fromList(
+          '*3\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n\$3\r\nbaz\r\n'.codeUnits),
+      iterations: 120000,
+    ),
+    (
+      name: 'RESP3 map %2',
+      payload: Uint8List.fromList('%2\r\n+a\r\n:1\r\n+b\r\n:2\r\n'.codeUnits),
+      iterations: 100000,
+    ),
+    (
+      name: 'RESP3 push message',
+      payload:
+          Uint8List.fromList('>3\r\n+message\r\n+room\r\n+hello\r\n'.codeUnits),
+      iterations: 100000,
+    ),
+  ];
 
-  const iterations = 100000;
+  for (final c in cases) {
+    final sw = Stopwatch()..start();
+    for (var i = 0; i < c.iterations; i++) {
+      RedisResponse.tryParseBytesWithConsumed(c.payload);
+    }
+    sw.stop();
 
-  // Benchmark simple string parsing
-  final sw1 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    RedisResponse.transform(simpleString);
+    final micros = sw.elapsedMicroseconds;
+    final perOp = micros / c.iterations;
+    final opsPerSec = c.iterations * 1000000 / micros;
+    print(
+      '${c.name.padRight(22)} '
+      'total=${micros}us '
+      'avg=${perOp.toStringAsFixed(3)}us '
+      'ops/s=${opsPerSec.toStringAsFixed(0)}',
+    );
   }
-  sw1.stop();
+  print('');
+}
+
+Future<void> benchmarkTransformer() async {
+  print('=== Stream Transformer Benchmark ===');
+
+  final oneFrame =
+      Uint8List.fromList('*2\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n'.codeUnits);
+  const frames = 40000;
+
+  final chunks = <Uint8List>[];
+  for (var i = 0; i < frames; i++) {
+    chunks.add(oneFrame);
+  }
+
+  final sw = Stopwatch()..start();
+  var count = 0;
+  final stream = Stream<Uint8List>.fromIterable(chunks)
+      .transform(BufferedRedisResponseTransformer());
+
+  await stream.forEach((_) {
+    count++;
+  });
+  sw.stop();
+  final micros = sw.elapsedMicroseconds;
+  final opsPerSec = count * 1000000 / micros;
   print(
-      'Simple string parsing: ${sw1.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw1.elapsedMicroseconds / iterations}μs per operation');
-
-  // Benchmark bulk string parsing
-  final sw2 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    RedisResponse.transform(bulkString);
-  }
-  sw2.stop();
-  print(
-      'Bulk string parsing: ${sw2.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw2.elapsedMicroseconds / iterations}μs per operation');
-
-  // Benchmark integer parsing
-  final sw3 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    RedisResponse.transform(integerResponse);
-  }
-  sw3.stop();
-  print(
-      'Integer parsing: ${sw3.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw3.elapsedMicroseconds / iterations}μs per operation');
-
-  // Benchmark array parsing
-  final sw4 = Stopwatch()..start();
-  for (var i = 0; i < 10000; i++) {
-    // Fewer iterations for arrays as they're more complex
-    RedisResponse.transform(arrayResponse);
-  }
-  sw4.stop();
-  print('Array parsing: ${sw4.elapsedMicroseconds}μs for 10000 iterations');
-  print('Average: ${sw4.elapsedMicroseconds / 10000}μs per operation');
-
-  // Benchmark error parsing
-  final sw5 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    RedisResponse.transform(errorResponse);
-  }
-  sw5.stop();
-  print(
-      'Error parsing: ${sw5.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw5.elapsedMicroseconds / iterations}μs per operation');
-
+      'frames=$count total=${micros}us ops/s=${opsPerSec.toStringAsFixed(0)}');
   print('');
 }
 
 void benchmarkMessageEncoding() {
-  print('=== Redis Message Encoding Benchmark ===');
+  print('=== RESP Encoding Benchmark ===');
 
   final encoder = RedisMessageEncoder();
-  const iterations = 100000;
+  final cases = <({String name, Object command, int iterations})>[
+    (
+      name: 'GET key',
+      command: <String>['GET', 'bench:key'],
+      iterations: 300000,
+    ),
+    (
+      name: 'SET key value',
+      command: <String>['SET', 'bench:key', 'hello'],
+      iterations: 250000,
+    ),
+    (
+      name: 'MGET 10 keys',
+      command: <String>[
+        'MGET',
+        'k1',
+        'k2',
+        'k3',
+        'k4',
+        'k5',
+        'k6',
+        'k7',
+        'k8',
+        'k9',
+        'k10',
+      ],
+      iterations: 120000,
+    ),
+    (
+      name: 'EVALSHA small',
+      command: <String>['EVALSHA', 'abc', '1', 'k1', 'arg1'],
+      iterations: 120000,
+    ),
+    (
+      name: 'LPUSH 100 values',
+      command: <String>[
+        'LPUSH',
+        'bench:list',
+        ...List<String>.generate(100, (i) => 'item:$i'),
+      ],
+      iterations: 30000,
+    ),
+  ];
 
-  // Test simple string encoding
-  final sw1 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    encoder.encode('hello');
+  for (final c in cases) {
+    final sw = Stopwatch()..start();
+    var bytes = 0;
+    for (var i = 0; i < c.iterations; i++) {
+      bytes += encoder.encode(c.command).length;
+    }
+    sw.stop();
+
+    final micros = sw.elapsedMicroseconds;
+    final perOp = micros / c.iterations;
+    final opsPerSec = c.iterations * 1000000 / micros;
+    print(
+      '${c.name.padRight(18)} '
+      'total=${micros}us '
+      'avg=${perOp.toStringAsFixed(3)}us '
+      'ops/s=${opsPerSec.toStringAsFixed(0)} '
+      'bytes=$bytes',
+    );
   }
-  sw1.stop();
-  print(
-      'String encoding: ${sw1.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw1.elapsedMicroseconds / iterations}μs per operation');
-
-  // Test array encoding
-  final testArray = ['GET', 'key'];
-  final sw2 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    encoder.encode(testArray);
-  }
-  sw2.stop();
-  print(
-      'Array encoding: ${sw2.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw2.elapsedMicroseconds / iterations}μs per operation');
-
-  // Test integer encoding
-  final sw3 = Stopwatch()..start();
-  for (var i = 0; i < iterations; i++) {
-    encoder.encode(42);
-  }
-  sw3.stop();
-  print(
-      'Integer encoding: ${sw3.elapsedMicroseconds}μs for $iterations iterations');
-  print('Average: ${sw3.elapsedMicroseconds / iterations}μs per operation');
-
-  // Test large array encoding
-  final largeArray = List.generate(100, (i) => 'item$i');
-  final sw4 = Stopwatch()..start();
-  for (var i = 0; i < 1000; i++) {
-    // Fewer iterations for large arrays
-    encoder.encode(largeArray);
-  }
-  sw4.stop();
-  print(
-      'Large array encoding: ${sw4.elapsedMicroseconds}μs for 1000 iterations');
-  print('Average: ${sw4.elapsedMicroseconds / 1000}μs per operation');
-
   print('');
 }

@@ -150,6 +150,45 @@ void main() {
       }
     });
 
+    test('protocolVersion 3 subscribe receives acknowledgements and messages',
+        () async {
+      final sub = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        protocolVersion: 3,
+      ));
+      final pub = sub.duplicate();
+      addTearDown(() async {
+        await sub.disconnect();
+        await pub.disconnect();
+      });
+
+      try {
+        final listener = await sub.subscribe('resp3:room');
+        final received = Completer<String?>();
+        listener.onMessage = (channel, message) {
+          if (channel == 'resp3:room' && !received.isCompleted) {
+            received.complete(message);
+          }
+        };
+
+        await pub.publish('resp3:room', 'resp3-ok');
+        expect(
+          await received.future.timeout(const Duration(seconds: 2)),
+          equals('resp3-ok'),
+        );
+
+        await sub.unsubscribe('resp3:room');
+      } catch (e) {
+        if (_isUnknownCommand(e, 'HELLO')) {
+          return;
+        }
+        rethrow;
+      }
+    });
+
     test('failed handshake keeps connection disconnected', () async {
       final badHandshake = Redis(RedisOptions(
         host: commonOptions.host,
