@@ -239,7 +239,12 @@ class RedisConnection {
       await existingSubscription.cancel();
       _subscription = null;
     }
-    await _redisSocket?.close();
+    _stream = null;
+    final socket = _redisSocket;
+    _redisSocket = null;
+    if (socket != null) {
+      await socket.close();
+    }
   }
 
   /// Disconnect redis connection
@@ -258,7 +263,10 @@ class RedisConnection {
       unawaited(existingSubscription.cancel());
       _subscription = null;
     }
-    _redisSocket?.destroy();
+    _stream = null;
+    final socket = _redisSocket;
+    _redisSocket = null;
+    socket?.destroy();
   }
 
   /// Handle connection reconnect
@@ -728,6 +736,7 @@ class RedisConnection {
       unawaited(existingSubscription.cancel());
     }
     _subscription = null;
+    _stream = null;
     _redisSocket?.destroy();
     _redisSocket = null;
   }

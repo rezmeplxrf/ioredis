@@ -70,6 +70,24 @@ void main() {
       expect(bulk.bytes, equals(bytes));
     });
 
+    test('byte parser can parse directly from a buffer range', () {
+      final payload = Uint8List.fromList(<int>[
+        120,
+        120,
+        43,
+        79,
+        75,
+        13,
+        10,
+        121,
+      ]);
+      final parsed =
+          RedisResponse.tryParseBytesWithConsumedInRange(payload, 2, 7);
+      expect(parsed, isNotNull);
+      expect(parsed!.$1, equals('OK'));
+      expect(parsed.$2, equals(5));
+    });
+
     test('byte parser supports RESP3 map and set', () {
       final mapPayload = Uint8List.fromList(<int>[
         37, 49, 13, 10, // %1

@@ -285,45 +285,62 @@ class RedisResponse {
   /// Parse one RESP value from [data], returning parsed value and consumed bytes.
   /// Bulk values are returned as [RedisBulkData] to preserve raw bytes.
   static (dynamic, int)? tryParseBytesWithConsumed(Uint8List data) {
-    return _parseBytesWithConsumedAt(data, 0);
+    return _parseBytesWithConsumedAt(data, 0, data.length);
   }
 
-  static (dynamic, int)? _parseBytesWithConsumedAt(Uint8List data, int start) {
-    if (start >= data.length) return null;
+  /// Parse one RESP value from [data] within [start, endExclusive).
+  /// Returns consumed bytes relative to [start].
+  static (dynamic, int)? tryParseBytesWithConsumedInRange(
+    Uint8List data,
+    int start,
+    int endExclusive,
+  ) {
+    if (start < 0 || endExclusive < start || endExclusive > data.length) {
+      return null;
+    }
+    return _parseBytesWithConsumedAt(data, start, endExclusive);
+  }
+
+  static (dynamic, int)? _parseBytesWithConsumedAt(
+    Uint8List data,
+    int start,
+    int endExclusive,
+  ) {
+    if (start >= endExclusive) return null;
 
     final firstByte = data[start];
     switch (firstByte) {
       case _CharCodes.plus:
-        final lineEnd = _findCrlf(data, start + 1);
+        final lineEnd = _findCrlf(data, start + 1, endExclusive);
         if (lineEnd == -1) return null;
         final value = _decodeAscii(data, start + 1, lineEnd);
-        return (value.isEmpty ? null : value, lineEnd + 2);
+        return (value.isEmpty ? null : value, lineEnd + 2 - start);
 
       case _CharCodes.colon:
-        final lineEnd = _findCrlf(data, start + 1);
+        final lineEnd = _findCrlf(data, start + 1, endExclusive);
         if (lineEnd == -1) return null;
         final number = _parseAsciiInt(data, start + 1, lineEnd);
-        return (number, lineEnd + 2);
+        return (number, lineEnd + 2 - start);
 
       case _CharCodes.minus:
-        final errorLineEnd = _findCrlf(data, start + 1);
+        final errorLineEnd = _findCrlf(data, start + 1, endExclusive);
         if (errorLineEnd == -1) return null;
         final errorValue = _decodeAscii(data, start + 1, errorLineEnd);
-        return (RedisServerErrorReply(errorValue), errorLineEnd + 2);
+        return (RedisServerErrorReply(errorValue), errorLineEnd + 2 - start);
 
       case _CharCodes.dollar:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
 
         final len = _parseAsciiInt(data, start + 1, headerEnd);
         if (len == null) return null;
         if (len == -1) {
-          return (null, headerEnd + 2);
+          return (null, headerEnd + 2 - start);
         }
 
         final dataStart = headerEnd + 2;
         final dataEnd = dataStart + len;
-        if (dataEnd + 2 > data.length) return null;
+        if (dataEnd + 2 > endExclusive) return null;
         if (data[dataEnd] != _CharCodes.cr ||
             data[dataEnd + 1] != _CharCodes.lf) {
           return null;
@@ -331,72 +348,73 @@ class RedisResponse {
 
         return (
           RedisBulkData(Uint8List.sublistView(data, dataStart, dataEnd)),
-          dataEnd + 2,
+          dataEnd + 2 - start,
         );
 
       case _CharCodes.asterisk:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
 
         final count = _parseAsciiInt(data, start + 1, headerEnd);
         if (count == null) return null;
-        if (count == -1) return (null, headerEnd + 2);
-        if (count == 0) return (<dynamic>[], headerEnd + 2);
+        if (count == -1) return (null, headerEnd + 2 - start);
+        if (count == 0) return (<dynamic>[], headerEnd + 2 - start);
 
         var position = headerEnd + 2;
         final values = <dynamic>[];
         for (var i = 0; i < count; i++) {
-          final parsed = _parseBytesWithConsumedAt(data, position);
+          final parsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (parsed == null) return null;
           values.add(parsed.$1);
-          position = parsed.$2;
+          position += parsed.$2;
         }
-        return (values, position);
+        return (values, position - start);
 
       case _CharCodes.underscore:
-        if (start + 3 > data.length) return null;
+        if (start + 3 > endExclusive) return null;
         if (data[start + 1] != _CharCodes.cr ||
             data[start + 2] != _CharCodes.lf) {
           return null;
         }
-        return (null, start + 3);
+        return (null, 3);
 
       case _CharCodes.comma:
-        final lineEnd = _findCrlf(data, start + 1);
+        final lineEnd = _findCrlf(data, start + 1, endExclusive);
         if (lineEnd == -1) return null;
         final number = double.tryParse(_decodeAscii(data, start + 1, lineEnd));
-        return (number, lineEnd + 2);
+        return (number, lineEnd + 2 - start);
 
       case _CharCodes.hash:
-        final lineEnd = _findCrlf(data, start + 1);
+        final lineEnd = _findCrlf(data, start + 1, endExclusive);
         if (lineEnd == -1) return null;
         final flag = _decodeAscii(data, start + 1, lineEnd).toLowerCase();
-        return (flag == 't', lineEnd + 2);
+        return (flag == 't', lineEnd + 2 - start);
 
       case _CharCodes.bang:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
         final len = _parseAsciiInt(data, start + 1, headerEnd);
         if (len == null || len < 0) return null;
         final dataStart = headerEnd + 2;
         final dataEnd = dataStart + len;
-        if (dataEnd + 2 > data.length) return null;
+        if (dataEnd + 2 > endExclusive) return null;
         if (data[dataEnd] != _CharCodes.cr ||
             data[dataEnd + 1] != _CharCodes.lf) {
           return null;
         }
         final message =
             utf8.decode(Uint8List.sublistView(data, dataStart, dataEnd));
-        return (RedisServerErrorReply(message), dataEnd + 2);
+        return (RedisServerErrorReply(message), dataEnd + 2 - start);
 
       case _CharCodes.equal:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
         final len = _parseAsciiInt(data, start + 1, headerEnd);
         if (len == null || len < 0) return null;
         final dataStart = headerEnd + 2;
         final dataEnd = dataStart + len;
-        if (dataEnd + 2 > data.length) return null;
+        if (dataEnd + 2 > endExclusive) return null;
         if (data[dataEnd] != _CharCodes.cr ||
             data[dataEnd + 1] != _CharCodes.lf) {
           return null;
@@ -405,83 +423,90 @@ class RedisResponse {
             utf8.decode(Uint8List.sublistView(data, dataStart, dataEnd));
         final split = full.indexOf(':');
         final value = split == -1 ? full : full.substring(split + 1);
-        return (value, dataEnd + 2);
+        return (value, dataEnd + 2 - start);
 
       case _CharCodes.percent:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
         final count = _parseAsciiInt(data, start + 1, headerEnd);
         if (count == null || count < 0) return null;
         var position = headerEnd + 2;
         final values = <dynamic, dynamic>{};
         for (var i = 0; i < count; i++) {
-          final keyParsed = _parseBytesWithConsumedAt(data, position);
+          final keyParsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (keyParsed == null) return null;
-          position = keyParsed.$2;
-          final valueParsed = _parseBytesWithConsumedAt(data, position);
+          position += keyParsed.$2;
+          final valueParsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (valueParsed == null) return null;
-          position = valueParsed.$2;
+          position += valueParsed.$2;
           values[keyParsed.$1] = valueParsed.$1;
         }
-        return (values, position);
+        return (values, position - start);
 
       case _CharCodes.tilde:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
         final count = _parseAsciiInt(data, start + 1, headerEnd);
         if (count == null || count < 0) return null;
         var position = headerEnd + 2;
         final values = <dynamic>{};
         for (var i = 0; i < count; i++) {
-          final parsed = _parseBytesWithConsumedAt(data, position);
+          final parsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (parsed == null) return null;
-          position = parsed.$2;
+          position += parsed.$2;
           values.add(parsed.$1);
         }
-        return (values, position);
+        return (values, position - start);
 
       case _CharCodes.greaterThan:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
         final count = _parseAsciiInt(data, start + 1, headerEnd);
         if (count == null || count < 0) return null;
         var position = headerEnd + 2;
         final values = <dynamic>[];
         for (var i = 0; i < count; i++) {
-          final parsed = _parseBytesWithConsumedAt(data, position);
+          final parsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (parsed == null) return null;
           values.add(parsed.$1);
-          position = parsed.$2;
+          position += parsed.$2;
         }
-        return (RedisPushData(values), position);
+        return (RedisPushData(values), position - start);
 
       case _CharCodes.leftParen:
-        final lineEnd = _findCrlf(data, start + 1);
+        final lineEnd = _findCrlf(data, start + 1, endExclusive);
         if (lineEnd == -1) return null;
         final number = BigInt.tryParse(_decodeAscii(data, start + 1, lineEnd));
-        return (number, lineEnd + 2);
+        return (number, lineEnd + 2 - start);
 
       case _CharCodes.pipe:
-        final headerEnd = _findCrlf(data, start + 1);
+        final headerEnd = _findCrlf(data, start + 1, endExclusive);
         if (headerEnd == -1) return null;
         final count = _parseAsciiInt(data, start + 1, headerEnd);
         if (count == null || count < 0) return null;
         var position = headerEnd + 2;
         final attributes = <dynamic, dynamic>{};
         for (var i = 0; i < count; i++) {
-          final keyParsed = _parseBytesWithConsumedAt(data, position);
+          final keyParsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (keyParsed == null) return null;
-          position = keyParsed.$2;
-          final valueParsed = _parseBytesWithConsumedAt(data, position);
+          position += keyParsed.$2;
+          final valueParsed =
+              _parseBytesWithConsumedAt(data, position, endExclusive);
           if (valueParsed == null) return null;
-          position = valueParsed.$2;
+          position += valueParsed.$2;
           attributes[keyParsed.$1] = valueParsed.$1;
         }
-        final next = _parseBytesWithConsumedAt(data, position);
+        final next = _parseBytesWithConsumedAt(data, position, endExclusive);
         if (next == null) return null;
+        position += next.$2;
         return (
           RedisAttributedData(attributes: attributes, data: next.$1),
-          next.$2,
+          position - start,
         );
 
       default:
@@ -489,8 +514,8 @@ class RedisResponse {
     }
   }
 
-  static int _findCrlf(Uint8List data, int start) {
-    for (var i = start; i + 1 < data.length; i++) {
+  static int _findCrlf(Uint8List data, int start, int endExclusive) {
+    for (var i = start; i + 1 < endExclusive; i++) {
       if (data[i] == _CharCodes.cr && data[i + 1] == _CharCodes.lf) {
         return i;
       }

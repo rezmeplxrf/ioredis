@@ -27,6 +27,8 @@ class RedisConnectionPool {
 
   /// Send command to connection
   Future<dynamic> sendCommand(List<String> commandList, {Duration? timeout}) {
+    _pruneDisconnectedConnections();
+
     /// If there is idle connection use idle connection
     final idleConnection = _getIdleConnection();
     if (idleConnection != null) {
@@ -146,5 +148,19 @@ class RedisConnectionPool {
       connection.destroy();
     }
     _poolConnections.clear();
+  }
+
+  void _pruneDisconnectedConnections() {
+    if (_poolConnections.isEmpty) {
+      return;
+    }
+    final stale = <int>[];
+    for (final entry in _poolConnections.entries) {
+      final status = entry.value.status;
+      if (status == RedisConnectionStatus.disconnected && !entry.value.isBusy) {
+        stale.add(entry.key);
+      }
+    }
+    stale.forEach(_destroyAndRemove);
   }
 }

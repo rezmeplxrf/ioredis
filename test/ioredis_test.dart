@@ -210,6 +210,35 @@ void main() {
       );
     });
 
+    test('disconnect allows immediate reconnect without failing first',
+        () async {
+      final client = Redis(commonOptions);
+      addTearDown(() async {
+        await client.disconnect();
+      });
+
+      await client.connect();
+      await client.disconnect();
+
+      await client.connect();
+      await client.set('reconnect_after_disconnect', 'ok');
+      expect(await client.get('reconnect_after_disconnect'), equals('ok'));
+    });
+
+    test('destroy allows immediate reconnect on RedisConnection', () async {
+      final conn = RedisConnection(commonOptions);
+      addTearDown(() async {
+        await conn.disconnect();
+      });
+
+      await conn.connect();
+      conn.destroy();
+
+      await conn.connect();
+      final pong = await conn.sendCommand(<String>['PING']);
+      expect(pong, equals('PONG'));
+    });
+
     test('pub/sub', () async {
       final sub = Redis(commonOptions);
       addTearDown(() async {

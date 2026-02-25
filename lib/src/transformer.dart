@@ -63,8 +63,10 @@ class BufferedRedisResponseTransformer
           end += data.length;
 
           while (end > start) {
-            final parsed = RedisResponse.tryParseBytesWithConsumed(
-              Uint8List.sublistView(buffer, start, end),
+            final parsed = RedisResponse.tryParseBytesWithConsumedInRange(
+              buffer,
+              start,
+              end,
             );
             if (parsed == null) break;
             sink.add(parsed.$1);
