@@ -25,7 +25,7 @@ void benchmarkResponseParsing() {
       iterations: 300000,
     ),
     (
-      name: 'bulk \$5 hello',
+      name: r'bulk $5 hello',
       payload: Uint8List.fromList('\$5\r\nhello\r\n'.codeUnits),
       iterations: 250000,
     ),
