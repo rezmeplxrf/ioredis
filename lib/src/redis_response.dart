@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 enum RedisResponseConstant {
   ok('OK'),
   simpleString('+'),
@@ -25,7 +23,7 @@ class _CharCodes {
 
 enum RedisType {
   normal('normal'),
-  subscriber('publisher'),
+  subscriber('subscriber'),
   publisher('publisher');
 
   const RedisType(this.name);
@@ -85,42 +83,11 @@ class RedisResponse {
   }
 
   static String? toBulkString(String s) {
-    if (s.length < 4) return null; // Minimum: $0\r\n\r\n
-
-    // Find first \r\n more efficiently
-    var crlfIndex = -1;
-    for (var i = 1; i < s.length - 1; i++) {
-      if (s.codeUnitAt(i) == _CharCodes.cr &&
-          s.codeUnitAt(i + 1) == _CharCodes.lf) {
-        crlfIndex = i;
-        break;
-      }
-    }
-
-    if (crlfIndex == -1) return null;
-
-    final lengthStr = s.substring(1, crlfIndex);
-    final length = int.tryParse(lengthStr);
-    if (length == null) return null;
-
-    // Check for null bulk string
-    if (length == -1) return null;
-
-    // Extract the data part more efficiently
-    final dataStartIndex = crlfIndex + 2;
-    if (dataStartIndex >= s.length) return null;
-
-    // For better UTF-8 handling, we need to work with bytes
-    final bytes = utf8.encode(s);
-    final headerBytes = utf8.encode(s.substring(0, dataStartIndex));
-    final dataEndByteIndex = headerBytes.length + length;
-
-    // Make sure we have enough bytes
-    if (bytes.length < dataEndByteIndex) return null;
-
-    // Extract the data bytes and decode back to string
-    final dataBytes = bytes.sublist(headerBytes.length, dataEndByteIndex);
-    return utf8.decode(dataBytes);
+    if (!isBulkString(s)) return null;
+    final parsed = tryParseWithConsumed(s);
+    if (parsed == null) return null;
+    final value = parsed.$1;
+    return value is String ? value : null;
   }
 
   static List<dynamic> toArrayString(String s) {

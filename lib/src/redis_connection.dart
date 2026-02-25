@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math';
 
@@ -6,6 +7,7 @@ import 'package:collection/collection.dart';
 import 'package:ioredis/ioredis.dart';
 import 'package:ioredis/src/default.dart';
 import 'package:ioredis/src/redis_message_encoder.dart';
+import 'package:ioredis/src/redis_response.dart';
 import 'package:ioredis/src/transformer.dart';
 
 class RedisConnection {
@@ -27,11 +29,15 @@ class RedisConnection {
   /// Current active socket;
   Stream<dynamic>? _stream;
 
+  // ignore: cancel_subscriptions
+  StreamSubscription<dynamic>? _subscription;
+
   /// Total retry count
   int _totalRetry = 0;
 
-  /// Current complete to listen for the response from redis
-  Completer<dynamic>? _completer;
+  /// Queue of pending command responses.
+  final Queue<Completer<dynamic>> _pendingResponses =
+      Queue<Completer<dynamic>>();
 
   /// Serializer to send the command to redis
   final RedisMessageEncoder _encoder = RedisMessageEncoder();
@@ -43,11 +49,18 @@ class RedisConnection {
   /// should not throw when disconnect is called programmatically
   bool _shouldThrowErrorOnConnection = true;
 
+  /// Number of in-flight commands on this connection.
+  int _inFlight = 0;
+
   /// check connection is free
-  bool isBusy = false;
+  bool get isBusy => _inFlight > 0;
 
   /// Listeners of subscribers
   final subscribeListeners = <RedisSubscriber>[];
+
+  Future<void>? _connectFuture;
+
+  bool _isReconnecting = false;
 
   /// Get current connection status
   String getStatus() => status.name;
@@ -62,6 +75,228 @@ class RedisConnection {
   /// await redis.connect()
   /// ```
   Future<void> connect() async {
+    await _connectGuarded(delayOnFailure: true);
+  }
+
+  Future<void> _connectGuarded({required bool delayOnFailure}) async {
+    final pending = _connectFuture;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+
+    final connectFuture =
+        _connectWithOptionalDelay(delayOnFailure: delayOnFailure);
+    _connectFuture = connectFuture;
+    try {
+      await connectFuture;
+    } finally {
+      if (identical(_connectFuture, connectFuture)) {
+        _connectFuture = null;
+      }
+    }
+  }
+
+  /// Listen response from redis and sent to completer ro callback.
+  /// onDone callback is use to listen redis disconnect to reconnect
+  /// Listen response from redis and sent to completer or callback.
+  /// onDone callback is used to listen for redis disconnect to reconnect
+  void _listenResponseFromRedis() {
+    final existingSubscription = _subscription;
+    if (existingSubscription != null) {
+      unawaited(existingSubscription.cancel());
+    }
+    _stream = _redisSocket
+        ?.transform<String>(transformer)
+        .transform<dynamic>(BufferedRedisResponseTransformer());
+
+    _subscription = _stream?.listen(
+      (dynamic packet) {
+        try {
+          if (packet is List && packet.isNotEmpty && packet[0] is String) {
+            final type = packet[0] as String;
+            final pmessage = type == 'pmessage';
+            final rmessage = type == 'message';
+            final isMessage = rmessage || pmessage;
+            if (isMessage && packet.length >= 3) {
+              final channel = packet[pmessage ? 2 : 1] as String;
+              final message = packet[pmessage ? 3 : 2] as String?;
+              final cb = _findSubscribeListener(
+                  pmessage ? packet[1] as String : channel);
+              cb?.onMessage?.call(channel, message);
+            }
+          }
+        } catch (e, st) {
+          print('packet: $packet');
+          print(e);
+          print(st);
+        }
+
+        // Pub/Sub pushed messages are not command responses.
+        if (!_isPubSubPush(packet)) {
+          _completeNextPending(packet);
+        }
+      },
+      onError: (Object error, StackTrace st) async {
+        _setDisconnectedState();
+        _failAllPending(error);
+        _throwSafeError(error);
+        unawaited(_reconnect());
+      },
+      onDone: () async {
+        _setDisconnectedState();
+        _failAllPending(Exception('Redis Disconnected'));
+        _throwSafeError(
+          Exception('Redis Disconnected'),
+        );
+        unawaited(_reconnect());
+      },
+    );
+  }
+
+  /// Disconnect redis connection
+  Future<void> disconnect() async {
+    _shouldReconnect = false;
+    _shouldThrowErrorOnConnection = false;
+    status = RedisConnectionStatus.disconnected;
+    _failAllPending(Exception('Redis connection closed'));
+    final existingSubscription = _subscription;
+    if (existingSubscription != null) {
+      await existingSubscription.cancel();
+      _subscription = null;
+    }
+    await _redisSocket?.close();
+  }
+
+  /// Disconnect redis connection
+  void destroy() {
+    _shouldReconnect = false;
+    _shouldThrowErrorOnConnection = false;
+    status = RedisConnectionStatus.disconnected;
+    _failAllPending(Exception('Redis connection destroyed'));
+    final existingSubscription = _subscription;
+    if (existingSubscription != null) {
+      unawaited(existingSubscription.cancel());
+      _subscription = null;
+    }
+    _redisSocket?.destroy();
+  }
+
+  /// Handle connection reconnect
+  Future<void> _reconnect() async {
+    if (_isReconnecting || !_shouldReconnect) {
+      return;
+    }
+    _isReconnecting = true;
+    try {
+      while (_shouldReconnect && status != RedisConnectionStatus.connected) {
+        _totalRetry++;
+        final retryDelay = option.retryStrategy?.call(_totalRetry) ??
+            Duration(milliseconds: min(_totalRetry * 50, 2000));
+        await Future<void>.delayed(retryDelay);
+        try {
+          await _connectGuarded(delayOnFailure: false);
+        } on SocketException catch (_) {
+          // Keep retrying in background.
+        } catch (_) {
+          // Keep retrying in background.
+        }
+      }
+    } finally {
+      _isReconnecting = false;
+    }
+  }
+
+  /// Send redis command
+  /// ```
+  /// await redis.sendCommand(['SET', 'foo', 'bar']);
+  /// await redis.sendCommand(['GET', 'foo']);
+  /// ```
+  Future<dynamic> _sendCommand(List<String> commandList) async {
+    if (status != RedisConnectionStatus.connected || _redisSocket == null) {
+      await connect();
+    }
+
+    final socket = _redisSocket;
+    if (socket == null || status != RedisConnectionStatus.connected) {
+      throw StateError('Redis connection is not available');
+    }
+
+    final completer = Completer<dynamic>();
+    _pendingResponses.addLast(completer);
+    try {
+      socket.add(_encoder.encode(commandList));
+    } catch (_) {
+      _pendingResponses.removeLast();
+      rethrow;
+    }
+
+    return completer.future;
+  }
+
+  /// Send redis command
+  /// ```
+  /// await redis.sendCommand(['SET', 'foo', 'bar']);
+  /// await redis.sendCommand(['GET', 'foo']);
+  /// ```
+  Future<dynamic> sendCommand(List<String> commandList) async {
+    _inFlight++;
+    try {
+      final value = await _sendCommand(commandList);
+      return value;
+    } finally {
+      _inFlight--;
+    }
+  }
+
+  /// Get subscribe listener callback related to the channel or pattern
+  RedisSubscriber? _findSubscribeListener(String channel) {
+    final cb = subscribeListeners.firstWhereOrNull((e) => e.channel == channel);
+    return cb;
+  }
+
+  /// Login to redis
+  Future<dynamic> _login() async {
+    final username = option.username;
+    final password = option.password;
+    if (password != null) {
+      final commands = username != null
+          ? <String>['AUTH', username, password]
+          : <String>['AUTH', password];
+      final result = await _sendCommand(commands) as String?;
+      if (!RedisResponse.ok(result)) {
+        throw Exception(result ?? 'AUTH failed');
+      }
+      return result;
+    }
+  }
+
+  /// Select database index
+  Future<dynamic> _selectDatabaseIndex() async {
+    final result =
+        await _sendCommand(<String>['SELECT', option.db.toString()]) as String?;
+    if (!RedisResponse.ok(result)) {
+      throw Exception(result ?? 'SELECT failed');
+    }
+    return result;
+  }
+
+  /// Safely throw error
+  /// If redis connection error,
+  /// stop throwing error to prevent application crash.
+  /// If onError is provided in redisOptions, it will be call to onError,
+  /// else error will log safely.
+  void _throwSafeError(dynamic err) {
+    if (!_shouldThrowErrorOnConnection) return;
+    final onError = option.onError;
+    if (onError != null) {
+      onError(err);
+    } else {
+      print(err);
+    }
+  }
+
+  Future<void> _connectWithOptionalDelay({required bool delayOnFailure}) async {
     _totalRetry++;
     try {
       status = RedisConnectionStatus.connecting;
@@ -96,165 +331,55 @@ class RedisConnection {
 
       /// Select database index
       await _selectDatabaseIndex();
-    } catch (error) {
-      if (error is SocketException) {
-        _throwSafeError(
-          Exception(error.message),
-        );
-        status = RedisConnectionStatus.disconnected;
+    } on SocketException catch (error) {
+      _setDisconnectedState();
+      _throwSafeError(
+        Exception(error.message),
+      );
+      if (delayOnFailure) {
+        final retryDelay = option.retryStrategy?.call(_totalRetry) ??
+            Duration(milliseconds: min(_totalRetry * 50, 2000));
+        await Future<void>.delayed(retryDelay);
+      }
+      rethrow;
+    }
+  }
 
-        /// If error is SocketException, need to reconnect
-        await _reconnect();
-      } else {
-        /// rethrow application logic errors
-        rethrow;
+  bool _isPubSubPush(dynamic packet) {
+    if (packet is! List || packet.isEmpty || packet[0] is! String) {
+      return false;
+    }
+    final type = packet[0] as String;
+    return type == 'message' || type == 'pmessage';
+  }
+
+  void _completeNextPending(dynamic packet) {
+    if (_pendingResponses.isEmpty) {
+      return;
+    }
+    final completer = _pendingResponses.removeFirst();
+    if (!completer.isCompleted) {
+      completer.complete(packet);
+    }
+  }
+
+  void _failAllPending(Object error) {
+    while (_pendingResponses.isNotEmpty) {
+      final completer = _pendingResponses.removeFirst();
+      if (!completer.isCompleted) {
+        completer.completeError(error);
       }
     }
   }
 
-  /// Listen response from redis and sent to completer ro callback.
-  /// onDone callback is use to listen redis disconnect to reconnect
-  /// Listen response from redis and sent to completer or callback.
-  /// onDone callback is used to listen for redis disconnect to reconnect
-  void _listenResponseFromRedis() {
-    _stream = _redisSocket
-        ?.transform<String>(transformer)
-        .transform<dynamic>(redisResponseTransformer);
-
-    _stream?.listen(
-      (dynamic packet) {
-        try {
-          if (packet is List && packet.isNotEmpty && packet[0] is String) {
-            final type = packet[0] as String;
-            final pmessage = type == 'pmessage';
-            final rmessage = type == 'message';
-            final isMessage = rmessage || pmessage;
-            if (isMessage && packet.length >= 3) {
-              final channel = packet[pmessage ? 2 : 1] as String;
-              final message = packet[pmessage ? 3 : 2] as String?;
-              final cb = _findSubscribeListener(
-                  pmessage ? packet[1] as String : channel);
-              cb?.onMessage?.call(channel, message);
-            }
-          }
-        } catch (e, st) {
-          print('packet: $packet');
-          print(e);
-          print(st);
-        } finally {
-          _completer?.complete(packet);
-          _completer = null;
-        }
-      },
-      onDone: () async {
-        _redisSocket?.destroy();
-        _redisSocket = null;
-        _throwSafeError(
-          Exception('Redis Disconnected'),
-        );
-        await _reconnect();
-      },
-    );
-  }
-
-  /// Disconnect redis connection
-  Future<void> disconnect() async {
-    _shouldReconnect = false;
-    _shouldThrowErrorOnConnection = false;
-    await _redisSocket?.close();
-  }
-
-  /// Disconnect redis connection
-  void destroy() {
-    _shouldReconnect = false;
-    _shouldThrowErrorOnConnection = false;
+  void _setDisconnectedState() {
+    status = RedisConnectionStatus.disconnected;
+    final existingSubscription = _subscription;
+    if (existingSubscription != null) {
+      unawaited(existingSubscription.cancel());
+    }
+    _subscription = null;
     _redisSocket?.destroy();
-  }
-
-  /// Handle connection reconnect
-  Future<void> _reconnect() async {
-    if (_shouldReconnect) {
-      final retryDelay = option.retryStrategy?.call(_totalRetry) ??
-          Duration(milliseconds: min(_totalRetry * 50, 2000));
-      await Future<void>.delayed(retryDelay);
-      await connect();
-    }
-  }
-
-  /// Send redis command
-  /// ```
-  /// await redis.sendCommand(['SET', 'foo', 'bar']);
-  /// await redis.sendCommand(['GET', 'foo']);
-  /// ```
-  Future<dynamic> _sendCommand(List<String> commandList) async {
-    try {
-      if (status == RedisConnectionStatus.disconnected) {
-        await connect();
-      }
-      // for the synchronous operations, execute one after another in a sequential manner
-      // send new command only if the response is completed from redis
-      while (true) {
-        if (_completer == null || _completer?.isCompleted == true) {
-          _completer = Completer<dynamic>();
-          _redisSocket?.add(_encoder.encode(commandList));
-          break;
-        }
-        await _completer?.future;
-      }
-      return await _completer?.future;
-    } catch (error) {
-      print(error);
-      return null;
-    }
-  }
-
-  /// Send redis command
-  /// ```
-  /// await redis.sendCommand(['SET', 'foo', 'bar']);
-  /// await redis.sendCommand(['GET', 'foo']);
-  /// ```
-  Future<dynamic> sendCommand(List<String> commandList) async {
-    isBusy = true;
-    final value = await _sendCommand(commandList);
-    isBusy = false;
-    return value;
-  }
-
-  /// Get subscribe listener callback related to the channel or pattern
-  RedisSubscriber? _findSubscribeListener(String channel) {
-    final cb = subscribeListeners.firstWhereOrNull((e) => e.channel == channel);
-    return cb;
-  }
-
-  /// Login to redis
-  Future<dynamic> _login() async {
-    final username = option.username;
-    final password = option.password;
-    if (password != null) {
-      final commands = username != null
-          ? <String>['AUTH', username, password]
-          : <String>['AUTH', password];
-      return _sendCommand(commands);
-    }
-  }
-
-  /// Select database index
-  Future<dynamic> _selectDatabaseIndex() async {
-    return _sendCommand(<String>['SELECT', option.db.toString()]);
-  }
-
-  /// Safely throw error
-  /// If redis connection error,
-  /// stop throwing error to prevent application crash.
-  /// If onError is provided in redisOptions, it will be call to onError,
-  /// else error will log safely.
-  void _throwSafeError(dynamic err) {
-    if (!_shouldThrowErrorOnConnection) return;
-    final onError = option.onError;
-    if (onError != null) {
-      onError(err);
-    } else {
-      print(err);
-    }
+    _redisSocket = null;
   }
 }

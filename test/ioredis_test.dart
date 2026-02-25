@@ -1,5 +1,6 @@
-// ignore_for_file: avoid_redundant_argument_values, use_is_even_rather_than_modulo, use_raw_strings
+// ignore_for_file: use_is_even_rather_than_modulo, use_raw_strings
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:ioredis/ioredis.dart';
@@ -7,19 +8,27 @@ import 'package:test/test.dart';
 
 // docker run -d --name redis -p 6379:6379 redis:8.6.1-alpine
 
-
-
 void main() {
   group('Redis |', () {
     late final Redis redis;
-    final commonOptions =
-        RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass');
+    final redisHost = Platform.environment['REDIS_HOST'] ?? '127.0.0.1';
+    final redisPort =
+        int.tryParse(Platform.environment['REDIS_PORT'] ?? '') ?? 6379;
+    final redisPassword = Platform.environment['REDIS_PASSWORD'];
+    final redisDb =
+        int.tryParse(Platform.environment['REDIS_DB_IOREDIS'] ?? '') ?? 10;
+    final commonOptions = RedisOptions(
+      host: redisHost,
+      port: redisPort,
+      password:
+          redisPassword == null || redisPassword.isEmpty ? null : redisPassword,
+      db: redisDb,
+    );
     setUpAll(() async {
       redis = Redis(commonOptions);
     });
     tearDownAll(() async {
       await redis.disconnect();
-      exit(0);
     });
     test('race request', () async {
       await redis.set('key1', 'redis1');
@@ -66,7 +75,12 @@ void main() {
 
     test('different db', () async {
       final db1 = Redis(commonOptions);
-      final db2 = Redis(RedisOptions(port: commonOptions.port, db: 2));
+      final db2 = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: 2,
+      ));
 
       await db1.set('dox', 'value1');
       await db2.set('dox', 'value2');
@@ -91,24 +105,35 @@ void main() {
 
     test('pub/sub', () async {
       final sub = Redis(commonOptions);
+      addTearDown(() async {
+        await sub.disconnect();
+      });
 
+      final chat1 = Completer<String?>();
       final subscriber1 = await sub.subscribe('chat1');
       subscriber1.onMessage = (channel, message) {
-        print(channel);
-        print(message);
+        if (channel == 'chat1' && !chat1.isCompleted) {
+          chat1.complete(message);
+        }
       };
 
+      final chat2 = Completer<String?>();
       final subscriber2 = await sub.subscribe('chat2');
       subscriber2.onMessage = (channel, message) {
-        print(channel);
-        print(message);
+        if (channel == 'chat2' && !chat2.isCompleted) {
+          chat2.complete(message);
+        }
       };
 
       final pub = sub.duplicate();
+      addTearDown(() async {
+        await pub.disconnect();
+      });
       await pub.publish('chat1', 'hi');
       await pub.publish('chat2', 'hello');
 
-      await Future<void>.delayed(const Duration(seconds: 1));
+      expect(await chat1.future.timeout(const Duration(seconds: 2)), 'hi');
+      expect(await chat2.future.timeout(const Duration(seconds: 2)), 'hello');
     });
 
     test('MGET', () async {
@@ -144,6 +169,13 @@ void main() {
     test('MGET with empty list', () async {
       final res = await redis.mget(<String>[]);
       expect(res, isEmpty);
+    });
+
+    test('MDELETE with empty list is no-op', () async {
+      await redis.set('mdelete_empty_guard', 'alive');
+      await redis.mdelete(<String>[]);
+      final value = await redis.get('mdelete_empty_guard');
+      expect(value, equals('alive'));
     });
 
     test('MGET with single non-existent key', () async {
@@ -338,6 +370,21 @@ void main() {
       expect(deletedValue, isNull);
     });
 
+    test('multi supports chaining and does not replay commands', () async {
+      final tx = redis.multi()
+        ..set('mkey1', 'v1')
+        ..set('mkey2', 'v2')
+        ..get('mkey1')
+        ..get('mkey2');
+      final first = await tx.exec();
+      expect(first.length, equals(4));
+      expect(first[2], equals('v1'));
+      expect(first[3], equals('v2'));
+
+      final second = await tx.exec();
+      expect(second, isEmpty);
+    });
+
     test('special Redis protocol characters in values', () async {
       // Test values that contain Redis protocol special characters
       final specialValues = [
@@ -372,8 +419,8 @@ void main() {
           expect(retrieved, contains('New York'));
         } catch (e) {
           // Skip JSON tests if RedisJSON module is not available
-          print(
-              'JSON tests skipped - RedisJSON module may not be available: $e');
+          if (_isRedisJsonUnavailable(e)) return;
+          rethrow;
         }
       });
 
@@ -402,8 +449,8 @@ void main() {
               await redis.jsonGet('complex:1', '.user.personal.age');
           expect(userAge, contains('25'));
         } catch (e) {
-          print(
-              'JSON nested tests skipped - RedisJSON module may not be available: $e');
+          if (_isRedisJsonUnavailable(e)) return;
+          rethrow;
         }
       });
 
@@ -423,8 +470,8 @@ void main() {
           expect(retrieved, contains('banana'));
           expect(retrieved, contains('orange'));
         } catch (e) {
-          print(
-              'JSON array tests skipped - RedisJSON module may not be available: $e');
+          if (_isRedisJsonUnavailable(e)) return;
+          rethrow;
         }
       });
 
@@ -443,8 +490,8 @@ void main() {
           expect(retrieved, contains('🚀'));
           expect(retrieved, contains('世界'));
         } catch (e) {
-          print(
-              'JSON unicode tests skipped - RedisJSON module may not be available: $e');
+          if (_isRedisJsonUnavailable(e)) return;
+          rethrow;
         }
       });
 
@@ -474,10 +521,38 @@ void main() {
           expect(specificKey, isNotNull);
           expect(specificKey, contains('value_500'));
         } catch (e) {
-          print(
-              'JSON large object tests skipped - RedisJSON module may not be available: $e');
+          if (_isRedisJsonUnavailable(e)) return;
+          rethrow;
+        }
+      });
+
+      test('JSON key prefix is applied', () async {
+        final prefixed = Redis(RedisOptions(
+          host: commonOptions.host,
+          port: commonOptions.port,
+          password: commonOptions.password,
+          db: commonOptions.db,
+          keyPrefix: 'jsonpref',
+        ));
+        addTearDown(() async {
+          await prefixed.disconnect();
+        });
+
+        try {
+          await prefixed.jsonSet('k1', '.', {'ok': true});
+          final raw = await redis.jsonGet('jsonpref:k1', '.');
+          expect(raw, isNotNull);
+          expect(raw, contains('ok'));
+        } catch (e) {
+          if (_isRedisJsonUnavailable(e)) return;
+          rethrow;
         }
       });
     });
   });
+}
+
+bool _isRedisJsonUnavailable(Object error) {
+  final message = error.toString().toUpperCase();
+  return message.contains('UNKNOWN COMMAND') && message.contains('JSON.');
 }

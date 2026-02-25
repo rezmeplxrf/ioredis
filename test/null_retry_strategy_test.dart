@@ -11,6 +11,7 @@ void main() {
         host: '127.0.0.1',
         port: 9999, // Non-existent port to trigger connection failure
         connectTimeout: const Duration(milliseconds: 100),
+        onError: (_) {},
       );
 
       final redis = Redis(options);
@@ -35,6 +36,7 @@ void main() {
         host: '127.0.0.1',
         port: 9998, // Non-existent port
         connectTimeout: const Duration(milliseconds: 50),
+        onError: (_) {},
       );
 
       final redis = Redis(options);

@@ -22,6 +22,9 @@ class RedisConnectionPool {
   /// Cache for random number generation
   final Random _random = Random();
 
+  /// Incremental pool id allocator.
+  int _nextConnectionId = 1;
+
   /// Send command to connection
   Future<dynamic> sendCommand(List<String> commandList) {
     /// If there is idle connection use idle connection
@@ -33,7 +36,7 @@ class RedisConnectionPool {
     }
 
     /// If no idle connection create new connection if not over maxConnection yet.
-    if (_poolConnections.length < option.maxConnection - 1) {
+    if (_poolConnections.length < option.maxConnection) {
       final connId = _getNewIdForPoolConnection();
       final conn = RedisConnection(option);
       _poolConnections[connId] = conn;
@@ -70,33 +73,35 @@ class RedisConnectionPool {
   MapEntry<int, RedisConnection>? _getRandomConnection() {
     if (_poolConnections.isEmpty) return null;
 
-    // Get all connected connections first
-    final connectedConnections = <MapEntry<int, RedisConnection>>[];
+    // Reservoir sampling over connected entries to avoid temporary list allocation.
+    MapEntry<int, RedisConnection>? selected;
+    var seen = 0;
     for (final entry in _poolConnections.entries) {
-      if (entry.value.status == RedisConnectionStatus.connected) {
-        connectedConnections.add(entry);
+      if (entry.value.status != RedisConnectionStatus.connected) {
+        continue;
+      }
+      seen++;
+      if (_random.nextInt(seen) == 0) {
+        selected = entry;
       }
     }
-
-    if (connectedConnections.isEmpty) return null;
-
-    // Return a random connected connection
-    final randomIndex = _random.nextInt(connectedConnections.length);
-    return connectedConnections[randomIndex];
+    return selected;
   }
 
   /// get new id for pool connection
   int _getNewIdForPoolConnection() {
-    if (_poolConnections.isEmpty) return 1;
-
-    // More efficient approach: find the maximum key and increment
-    var maxKey = 0;
-    for (final key in _poolConnections.keys) {
-      if (key > maxKey) maxKey = key;
+    final start = _nextConnectionId;
+    while (_poolConnections.containsKey(_nextConnectionId)) {
+      _nextConnectionId =
+          _nextConnectionId >= 1000000 ? 1 : _nextConnectionId + 1;
+      if (_nextConnectionId == start) {
+        throw StateError('Unable to allocate connection id');
+      }
     }
-
-    // Reset to 1 if we reach the limit, otherwise increment
-    return maxKey > 1000000 ? 1 : maxKey + 1;
+    final allocated = _nextConnectionId;
+    _nextConnectionId =
+        _nextConnectionId >= 1000000 ? 1 : _nextConnectionId + 1;
+    return allocated;
   }
 
   /// Reset timer

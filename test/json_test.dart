@@ -1,6 +1,7 @@
-// ignore_for_file: avoid_redundant_argument_values, use_raw_strings
+// ignore_for_file: use_raw_strings
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:ioredis/ioredis.dart';
 import 'package:test/test.dart';
@@ -11,12 +12,20 @@ import 'package:test/test.dart';
 //   --restart unless-stopped \
 //   redis/redis-stack:latest
 
-
-
-
 void main() async {
-  final redis =
-      Redis(RedisOptions(host: '127.0.0.1', port: 6379, password: 'pass'));
+  final redisHost = Platform.environment['REDIS_HOST'] ?? '127.0.0.1';
+  final redisPort =
+      int.tryParse(Platform.environment['REDIS_PORT'] ?? '') ?? 6379;
+  final redisPassword = Platform.environment['REDIS_PASSWORD'];
+  final redisDb =
+      int.tryParse(Platform.environment['REDIS_DB_JSON'] ?? '') ?? 11;
+  final redis = Redis(RedisOptions(
+    host: redisHost,
+    port: redisPort,
+    password:
+        redisPassword == null || redisPassword.isEmpty ? null : redisPassword,
+    db: redisDb,
+  ));
 
   setUpAll(() async {
     await redis.connect();
@@ -53,7 +62,6 @@ void main() async {
       // Get JSON value
       final result = await redis.jsonGet(key, path);
       final decodedResult = jsonDecode(result!);
-      print(decodedResult);
       expect(decodedResult, equals(jsonDecode(value)));
     });
 
@@ -69,7 +77,6 @@ void main() async {
       const queryPath = r'$.name';
       final result = await redis.jsonGet(key, queryPath);
       final decodedResult = jsonDecode(result!);
-      print(decodedResult);
 
       // The result is an array
       expect(decodedResult[0], equals('Doe'));

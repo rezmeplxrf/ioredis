@@ -1,13 +1,28 @@
+import 'dart:io';
+
 import 'package:ioredis/ioredis.dart';
 import 'package:test/test.dart';
 
 void main() {
   group('Redis eval |', () {
     late Redis redis;
+    final redisHost = Platform.environment['REDIS_HOST'] ?? '127.0.0.1';
+    final redisPort =
+        int.tryParse(Platform.environment['REDIS_PORT'] ?? '') ?? 6379;
+    final redisPassword = Platform.environment['REDIS_PASSWORD'];
+    final redisDb =
+        int.tryParse(Platform.environment['REDIS_DB_EVAL'] ?? '') ?? 12;
 
     setUpAll(() async {
       redis = Redis(
-        RedisOptions(),
+        RedisOptions(
+          host: redisHost,
+          port: redisPort,
+          password: redisPassword == null || redisPassword.isEmpty
+              ? null
+              : redisPassword,
+          db: redisDb,
+        ),
       );
     });
 
@@ -32,7 +47,15 @@ void main() {
 
     test('applies key prefix for eval keys', () async {
       final prefixedRedis = Redis(
-        RedisOptions(keyPrefix: 'pref'),
+        RedisOptions(
+          host: redisHost,
+          port: redisPort,
+          password: redisPassword == null || redisPassword.isEmpty
+              ? null
+              : redisPassword,
+          db: redisDb,
+          keyPrefix: 'pref',
+        ),
       );
       addTearDown(() async {
         await prefixedRedis.disconnect();

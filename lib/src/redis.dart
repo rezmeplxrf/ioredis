@@ -40,6 +40,7 @@ class Redis {
 
   /// Disconnect to redis connection
   Future<void> disconnect() async {
+    pool.dispose();
     await connection.disconnect();
   }
 
@@ -75,12 +76,15 @@ class Redis {
   /// await redis.get('foo');
   /// ```
   Future<List<String?>> mget(List<String> keys) async {
+    if (keys.isEmpty) {
+      return <String?>[];
+    }
     final result =
         await sendCommand(<String>['MGET', ..._setPrefixInKeys(keys)]);
     if (result is List) {
       return result.cast<String?>();
     }
-    return <String?>[];
+    throw StateError('Unexpected response for MGET: ${result.runtimeType}');
   }
 
   /// Delete a key
@@ -99,6 +103,9 @@ class Redis {
   /// await redis.get('foo');
   /// ```
   Future<void> mdelete(List<String> keys) async {
+    if (keys.isEmpty) {
+      return;
+    }
     await sendCommand(<String>['DEL', ..._setPrefixInKeys(keys)]);
   }
 
@@ -201,8 +208,7 @@ class Redis {
   /// setting keys prefix before setting or getting values
   List<String> _setPrefixInKeys(List<String> keys) {
     return keys
-        .map((k) =>
-            option.keyPrefix.isNotEmpty ? '${option.keyPrefix}:$k' : k)
+        .map((k) => option.keyPrefix.isNotEmpty ? '${option.keyPrefix}:$k' : k)
         .toList();
   }
 
@@ -211,7 +217,8 @@ class Redis {
   /// String? value = await redis.jsonGet('key', '$.path');
   /// ```
   Future<String?> jsonGet(String key, String path) async {
-    return await sendCommand(['JSON.GET', key, path]) as String?;
+    final prefixedKey = _setPrefixInKeys(<String>[key]).first;
+    return await sendCommand(['JSON.GET', prefixedKey, path]) as String?;
   }
 
   /// Set JSON value
@@ -231,8 +238,12 @@ class Redis {
       }
     }
 
-    final val =
-        await sendCommand(['JSON.SET', key, path, jsonString]) as String?;
+    final val = await sendCommand([
+      'JSON.SET',
+      _setPrefixInKeys(<String>[key]).first,
+      path,
+      jsonString
+    ]) as String?;
     if (!RedisResponse.ok(val)) {
       throw Exception(val);
     }
