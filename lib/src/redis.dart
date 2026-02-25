@@ -28,6 +28,8 @@ class Redis {
   RedisType redisClientType = RedisType.normal;
 
   final Random _retryRandom = Random();
+  RedisConnection? _transactionConnection;
+  Future<void> _transactionTail = Future<void>.value();
 
   /// Set custom socket
   void setSocket(Socket socket) {
@@ -45,6 +47,11 @@ class Redis {
   Future<void> disconnect() async {
     pool.dispose();
     await connection.disconnect();
+    final txConnection = _transactionConnection;
+    _transactionConnection = null;
+    if (txConnection != null) {
+      await txConnection.disconnect();
+    }
     redisClientType = RedisType.normal;
   }
 
@@ -130,6 +137,19 @@ class Redis {
   /// ```
   RedisMulti multi() {
     return RedisMulti(this);
+  }
+
+  /// Start an optimistic transaction wrapper on a dedicated connection.
+  Future<RedisOptimisticTransaction> watch(List<String> keys) async {
+    return RedisOptimisticTransaction.start(
+      option: option.clone(),
+      keys: _setPrefixInKeys(keys),
+    );
+  }
+
+  /// Send UNWATCH on the current client connection.
+  Future<void> unwatch() async {
+    await sendCommand(<String>['UNWATCH']);
   }
 
   /// command pipeline with batched writes and ordered responses.
@@ -603,10 +623,15 @@ class Redis {
     List<List<String>> commands, {
     Duration? timeout,
     int? batchSize,
+    RedisRetryPolicy? retryPolicy,
   }) async {
     if (commands.isEmpty) {
       return <dynamic>[];
     }
+    final policy = retryPolicy ?? option.retryPolicy;
+    final sw = Stopwatch()..start();
+    final commandForEvent = <String>['PIPELINE', commands.length.toString()];
+    var attempt = 1;
     final effectiveBatchSize = batchSize ?? option.pipelineBatchSize;
     if (effectiveBatchSize <= 0) {
       throw ArgumentError.value(
@@ -615,17 +640,90 @@ class Redis {
         'must be greater than 0',
       );
     }
-    if (commands.length <= effectiveBatchSize) {
-      return connection.sendPipeline(commands, timeout: timeout);
-    }
 
-    final out = <dynamic>[];
-    for (var start = 0; start < commands.length; start += effectiveBatchSize) {
-      final end = min(start + effectiveBatchSize, commands.length);
-      final batch = commands.sublist(start, end);
-      out.addAll(await connection.sendPipeline(batch, timeout: timeout));
+    while (true) {
+      try {
+        if (commands.length <= effectiveBatchSize) {
+          final result =
+              await connection.sendPipeline(commands, timeout: timeout);
+          _emitEvent(RedisEvent(
+            type: RedisEventType.commandSuccess,
+            command: commandForEvent,
+            duration: sw.elapsed,
+          ));
+          return result;
+        }
+
+        final out = <dynamic>[];
+        for (var start = 0;
+            start < commands.length;
+            start += effectiveBatchSize) {
+          final end = min(start + effectiveBatchSize, commands.length);
+          final batch = commands.sublist(start, end);
+          out.addAll(await connection.sendPipeline(batch, timeout: timeout));
+        }
+        _emitEvent(RedisEvent(
+          type: RedisEventType.commandSuccess,
+          command: commandForEvent,
+          duration: sw.elapsed,
+        ));
+        return out;
+      } catch (error) {
+        final mapped = RedisErrorMapper.map(error, command: commandForEvent);
+        if (policy == null ||
+            !policy.canRetry(mapped, attempt, commandForEvent)) {
+          _emitEvent(RedisEvent(
+            type: RedisEventType.commandError,
+            command: commandForEvent,
+            duration: sw.elapsed,
+            error: mapped,
+          ));
+          throw mapped;
+        }
+        _emitEvent(RedisEvent(
+          type: RedisEventType.commandRetry,
+          command: commandForEvent,
+          attempt: attempt,
+          error: mapped,
+        ));
+        await Future<void>.delayed(policy.nextDelay(attempt, _retryRandom));
+        attempt++;
+      }
     }
-    return out;
+  }
+
+  /// Execute MULTI/EXEC commands on a reusable dedicated transaction connection.
+  Future<List<dynamic>> executeMulti(List<List<String>> commands) {
+    if (commands.isEmpty) {
+      return Future<List<dynamic>>.value(<dynamic>[]);
+    }
+    return _withTransactionConnection<List<dynamic>>((conn) async {
+      var multiStarted = false;
+      var execSent = false;
+      try {
+        await conn.sendCommand(<String>['MULTI']);
+        multiStarted = true;
+        for (final command in commands) {
+          await conn.sendCommand(command);
+        }
+        execSent = true;
+        final result = await conn.sendCommand(<String>['EXEC']);
+        if (result is List<dynamic>) {
+          return result;
+        }
+        if (result == null) {
+          return <dynamic>[];
+        }
+        throw StateError('Unexpected response for EXEC: ${result.runtimeType}');
+      } catch (_) {
+        if (multiStarted && !execSent) {
+          try {
+            await conn.sendCommand(<String>['DISCARD']);
+          } catch (_) {}
+        }
+        rethrow;
+      }
+    });
   }
 
   /// get command to set data to redis
@@ -779,6 +877,21 @@ class Redis {
           },
         )
         .toList(growable: false);
+  }
+
+  Future<T> _withTransactionConnection<T>(
+    Future<T> Function(RedisConnection connection) work,
+  ) {
+    final completer = Completer<T>();
+    _transactionTail = _transactionTail.catchError((_) {}).then((_) async {
+      final conn = _transactionConnection ??= RedisConnection(option);
+      try {
+        completer.complete(await work(conn));
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    return completer.future;
   }
 
   void _emitEvent(RedisEvent event) {

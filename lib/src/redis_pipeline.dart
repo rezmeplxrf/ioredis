@@ -27,7 +27,11 @@ class RedisPipeline {
     return this;
   }
 
-  Future<List<dynamic>> exec({Duration? timeout, int? batchSize}) async {
+  Future<List<dynamic>> exec({
+    Duration? timeout,
+    int? batchSize,
+    RedisRetryPolicy? retryPolicy,
+  }) async {
     final commands = List<List<String>>.from(_commands);
     _commands.clear();
     if (commands.isEmpty) {
@@ -37,6 +41,7 @@ class RedisPipeline {
       commands,
       timeout: timeout,
       batchSize: batchSize,
+      retryPolicy: retryPolicy,
     );
   }
 }

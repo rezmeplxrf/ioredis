@@ -12,6 +12,8 @@ A high-performance Redis client for Dart that provides a simple, intuitive API f
 - ✅ **Connection Management**: Automatic reconnection with retry strategies
 - ✅ **Type Safety**: Strongly typed API with null safety
 - ✅ **Bulk Operations**: Efficient bulk get/set/delete operations
+- ✅ **Optimistic Transactions**: WATCH/UNWATCH helpers for conflict-safe updates
+- ✅ **TLS Options**: Configurable `SecurityContext`, cert validation callback, and ALPN protocols
 
 ## Installation
 
@@ -73,6 +75,10 @@ final redis = Redis(RedisOptions(
   protocolVersion: 3, // optional RESP3 via HELLO
   pipelineBatchSize: 256, // split large pipelines into smaller writes
   maxPendingCommands: 10000, // backpressure cap for in-flight responses
+  secure: true,
+  tlsContext: SecurityContext.defaultContext,
+  onBadCertificate: (cert) => false,
+  supportedProtocols: const ['redis'],
   // optional observability hook
   onEvent: (event) {
     print('${event.type} ${event.command} ${event.duration}');
@@ -158,6 +164,18 @@ patternSubscriber.onMessage = (String pattern, String? message) {
 final publisher = subscriber.duplicate();
 await publisher.publish('chat_room', 'Hello everyone!');
 await publisher.publish('user:123', 'Personal message');
+```
+
+### Optimistic Transactions (WATCH/UNWATCH)
+
+```dart
+final tx = await redis.watch(['inventory:item:42']);
+tx.set('inventory:item:42', 'in_stock');
+final result = await tx.exec();
+
+if (result == null) {
+  // watched key changed by another client, retry if needed
+}
 ```
 
 ### JSON Operations (RedisJSON Module)

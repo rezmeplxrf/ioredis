@@ -94,6 +94,8 @@ class RedisConnection {
   /// await redis.connect()
   /// ```
   Future<void> connect() async {
+    _shouldReconnect = true;
+    _shouldThrowErrorOnConnection = true;
     _emitEvent(RedisEvent(
       type: RedisEventType.connectStart,
       endpoint: '${option.host}:${option.port}',
@@ -103,6 +105,8 @@ class RedisConnection {
 
   /// Force reconnection, optionally after host/port has changed in options.
   Future<void> reconnect({bool force = false}) async {
+    _shouldReconnect = true;
+    _shouldThrowErrorOnConnection = true;
     if (force) {
       _setDisconnectedState();
     }
@@ -291,13 +295,20 @@ class RedisConnection {
     Duration? timeout,
     bool rawReply = false,
     List<String>? commandForError,
+    bool allowWhileConnecting = false,
   }) async {
-    if (status != RedisConnectionStatus.connected || _redisSocket == null) {
+    final canSendWhileConnecting = allowWhileConnecting &&
+        status == RedisConnectionStatus.connecting &&
+        _redisSocket != null;
+    if (!canSendWhileConnecting &&
+        (status != RedisConnectionStatus.connected || _redisSocket == null)) {
       await connect();
     }
 
     final socket = _redisSocket;
-    if (socket == null || status != RedisConnectionStatus.connected) {
+    if (socket == null ||
+        (status != RedisConnectionStatus.connected &&
+            !canSendWhileConnecting)) {
       throw RedisConnectionError('Redis connection is not available');
     }
 
@@ -457,7 +468,8 @@ class RedisConnection {
       final commands = username != null
           ? <String>['AUTH', username, password]
           : <String>['AUTH', password];
-      final result = await _sendCommand(commands) as String?;
+      final result =
+          await _sendCommand(commands, allowWhileConnecting: true) as String?;
       if (!RedisResponse.ok(result)) {
         throw RedisAuthError(result ?? 'AUTH failed', command: commands);
       }
@@ -481,14 +493,15 @@ class RedisConnection {
       ]);
     }
 
-    final result = await _sendCommand(command);
+    final result = await _sendCommand(command, allowWhileConnecting: true);
     return result;
   }
 
   /// Select database index
   Future<dynamic> _selectDatabaseIndex() async {
     final command = <String>['SELECT', option.db.toString()];
-    final result = await _sendCommand(command) as String?;
+    final result =
+        await _sendCommand(command, allowWhileConnecting: true) as String?;
     if (!RedisResponse.ok(result)) {
       throw RedisCommandError('SELECT', result ?? 'SELECT failed',
           command: command);
@@ -510,15 +523,20 @@ class RedisConnection {
   }
 
   Future<void> _connectWithOptionalDelay({required bool delayOnFailure}) async {
-    _totalRetry++;
     try {
       status = RedisConnectionStatus.connecting;
 
       /// Create new socket if not exist
       if (_redisSocket == null) {
         if (option.secure) {
-          _redisSocket = await SecureSocket.connect(option.host, option.port,
-              timeout: option.connectTimeout);
+          _redisSocket = await SecureSocket.connect(
+            option.host,
+            option.port,
+            timeout: option.connectTimeout,
+            context: option.tlsContext,
+            onBadCertificate: option.onBadCertificate,
+            supportedProtocols: option.supportedProtocols,
+          );
         } else {
           _redisSocket = await Socket.connect(option.host, option.port,
               timeout: option.connectTimeout);
@@ -533,16 +551,6 @@ class RedisConnection {
       /// listening for response
       _listenResponseFromRedis();
 
-      /// Set status as connected
-      status = RedisConnectionStatus.connected;
-      _emitEvent(RedisEvent(
-        type: RedisEventType.connectSuccess,
-        endpoint: '${option.host}:${option.port}',
-      ));
-
-      /// Once socket is connect reset retry count to zero
-      _totalRetry = 0;
-
       await _hello();
 
       /// If username is provided, we need to login before calling other commands
@@ -552,17 +560,28 @@ class RedisConnection {
 
       /// Select database index
       await _selectDatabaseIndex();
+
+      /// Set status as connected after the handshake has succeeded.
+      status = RedisConnectionStatus.connected;
+      _emitEvent(RedisEvent(
+        type: RedisEventType.connectSuccess,
+        endpoint: '${option.host}:${option.port}',
+      ));
+
+      /// Once socket is connect reset retry count to zero
+      _totalRetry = 0;
       final reconnectHook = onReconnect;
       if (reconnectHook != null) {
         await reconnectHook();
       }
-    } on SocketException catch (error) {
+    } catch (error) {
       _setDisconnectedState();
-      final mapped = RedisConnectionError(error.message, cause: error);
+      final mapped = RedisErrorMapper.map(error);
       _throwSafeError(mapped);
       if (delayOnFailure) {
-        final retryDelay = option.retryStrategy?.call(_totalRetry) ??
-            Duration(milliseconds: min(_totalRetry * 50, 2000));
+        final retryAttempt = max(_totalRetry, 1);
+        final retryDelay = option.retryStrategy?.call(retryAttempt) ??
+            Duration(milliseconds: min(retryAttempt * 50, 2000));
         await Future<void>.delayed(retryDelay);
       }
       throw mapped;

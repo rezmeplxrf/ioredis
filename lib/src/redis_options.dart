@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:ioredis/src/redis_event.dart';
 import 'package:ioredis/src/redis_retry_policy.dart';
 
@@ -21,6 +23,9 @@ class RedisOptions {
     this.onEvent,
     this.pipelineBatchSize = 256,
     this.maxPendingCommands = 10000,
+    this.tlsContext,
+    this.onBadCertificate,
+    this.supportedProtocols,
   });
 
   /// timeout value for socket connection
@@ -83,6 +88,15 @@ class RedisOptions {
   /// hard cap for pending responses to bound memory usage.
   int maxPendingCommands;
 
+  /// TLS context used when [secure] is true.
+  SecurityContext? tlsContext;
+
+  /// Optional certificate verifier for TLS connections.
+  bool Function(X509Certificate certificate)? onBadCertificate;
+
+  /// Optional ALPN protocol list for TLS connections.
+  List<String>? supportedProtocols;
+
   RedisOptions clone() {
     return RedisOptions(
       keyPrefix: keyPrefix,
@@ -103,6 +117,11 @@ class RedisOptions {
       onEvent: onEvent,
       pipelineBatchSize: pipelineBatchSize,
       maxPendingCommands: maxPendingCommands,
+      tlsContext: tlsContext,
+      onBadCertificate: onBadCertificate,
+      supportedProtocols: supportedProtocols == null
+          ? null
+          : List<String>.from(supportedProtocols!),
     );
   }
 }

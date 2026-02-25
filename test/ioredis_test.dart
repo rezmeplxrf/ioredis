@@ -150,6 +150,27 @@ void main() {
       }
     });
 
+    test('failed handshake keeps connection disconnected', () async {
+      final badHandshake = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: 999999,
+      ));
+      addTearDown(() async {
+        await badHandshake.disconnect();
+      });
+
+      await expectLater(
+        badHandshake.set('handshake_should_fail', 'x'),
+        throwsA(isA<RedisCommandError>()),
+      );
+      expect(
+        badHandshake.connection.status,
+        equals(RedisConnectionStatus.disconnected),
+      );
+    });
+
     test('pub/sub', () async {
       final sub = Redis(commonOptions);
       addTearDown(() async {
@@ -669,6 +690,73 @@ void main() {
         throwsA(isA<RedisCommandError>()),
       );
       expect(retriesInvoked, 2);
+    });
+
+    test('pipeline retry policy honors max attempts', () async {
+      var retriesInvoked = 0;
+      final retryPolicy = RedisRetryPolicy(
+        maxAttempts: 3,
+        initialDelay: Duration.zero,
+        maxDelay: Duration.zero,
+        shouldRetry: (error, attempt, command) {
+          retriesInvoked++;
+          return true;
+        },
+      );
+
+      await expectLater(
+        redis.sendPipeline(
+          <List<String>>[
+            <String>['DOES_NOT_EXIST_COMMAND'],
+          ],
+          retryPolicy: retryPolicy,
+        ),
+        throwsA(isA<RedisCommandError>()),
+      );
+      expect(retriesInvoked, 2);
+    });
+
+    test('optimistic watch transaction commits when unchanged', () async {
+      await redis.set('watch:source', 'a');
+      final tx = await redis.watch(<String>['watch:source']);
+      tx.set('watch:target', 'ok');
+      final result = await tx.exec();
+      expect(result, isNotNull);
+      expect(await redis.get('watch:target'), equals('ok'));
+    });
+
+    test('optimistic watch transaction aborts on conflict', () async {
+      await redis.set('watch:conflict', 'v1');
+      final tx = await redis.watch(<String>['watch:conflict']);
+      final updater = redis.duplicate();
+      addTearDown(() async {
+        await updater.disconnect();
+      });
+
+      await updater.set('watch:conflict', 'v2');
+      tx.set('watch:should_not_commit', 'blocked');
+      final result = await tx.exec();
+
+      expect(result, isNull);
+      expect(await redis.get('watch:should_not_commit'), isNull);
+    });
+
+    test('RedisOptions clone preserves TLS options', () {
+      final context = SecurityContext();
+      final options = RedisOptions(
+        secure: true,
+        tlsContext: context,
+        onBadCertificate: (_) => true,
+        supportedProtocols: <String>['redis'],
+      );
+
+      final cloned = options.clone();
+      expect(identical(cloned.tlsContext, context), isTrue);
+      expect(cloned.onBadCertificate, isNotNull);
+      expect(cloned.supportedProtocols, equals(<String>['redis']));
+
+      cloned.supportedProtocols!.add('other');
+      expect(options.supportedProtocols, equals(<String>['redis']));
     });
 
     test('core data-structure command wrappers', () async {

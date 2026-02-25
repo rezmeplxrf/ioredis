@@ -29,34 +29,6 @@ class RedisMulti {
   Future<List<dynamic>> exec() async {
     final commands = List<List<String>>.from(_commands);
     _commands.clear();
-
-    final txRedis = _redis.duplicate();
-    var multiStarted = false;
-    var execSent = false;
-    try {
-      await txRedis.connection.sendCommand(<String>['MULTI']);
-      multiStarted = true;
-      for (final command in commands) {
-        await txRedis.connection.sendCommand(command);
-      }
-      execSent = true;
-      final result = await txRedis.connection.sendCommand(<String>['EXEC']);
-      if (result is List<dynamic>) {
-        return result;
-      }
-      if (result == null) {
-        return <dynamic>[];
-      }
-      throw StateError('Unexpected response for EXEC: ${result.runtimeType}');
-    } catch (_) {
-      if (multiStarted && !execSent) {
-        try {
-          await txRedis.connection.sendCommand(<String>['DISCARD']);
-        } catch (_) {}
-      }
-      rethrow;
-    } finally {
-      await txRedis.disconnect();
-    }
+    return _redis.executeMulti(commands);
   }
 }
