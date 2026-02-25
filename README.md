@@ -12,6 +12,7 @@ connection pooling, pipelines, transactions, pub/sub, and binary-safe payloads.
 - MULTI/EXEC and WATCH-based optimistic transactions
 - Pub/Sub (`SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`)
 - Binary-safe APIs (`setBuffer` / `getBuffer`)
+- Generic command API for full Redis command coverage (`command` / `sendObjectCommand`)
 - Scan iterators (`scanIterator`, `hscanIterator`, `sscanIterator`, `zscanIterator`)
 - Script helpers (`eval`, `evalsha`, `scriptLoad`)
 - RedisJSON helpers (`jsonSet`, `jsonGet`) when module is installed
@@ -67,6 +68,10 @@ final redis = Redis(RedisOptions(
   onPush: (push) {
     print('push => ${push.items}');
   },
+  // Receive packets that arrive without a pending command (for MONITOR, etc).
+  onUnmatchedPacket: (packet) {
+    print('unmatched => $packet');
+  },
   maxConnection: 10,
   idleTimeout: const Duration(seconds: 10),
   pipelineBatchSize: 256,
@@ -102,6 +107,13 @@ final v1 = await redis.get('k1');
 await redis.set('k2', 'v2');
 final values = await redis.mget(<String>['k1', 'k2', 'missing']);
 await redis.mdelete(<String>['k1', 'k2']);
+```
+
+### Generic command API
+
+```dart
+await redis.command('SET', args: <Object?>['k1', 'v1']);
+final v1 = await redis.command('GET', args: <Object?>['k1']);
 ```
 
 ### Pipeline
@@ -184,6 +196,30 @@ await redis.jsonSet('user:1', '.', {'name': 'alice'});
 final full = await redis.jsonGet('user:1', '.');
 final name = await redis.jsonGet('user:1', '.name');
 ```
+
+## TODO: Missing First-Class Command Wrappers
+
+All commands below are still callable via `command(...)`, `sendCommand(...)`, or
+`sendObjectCommand(...)`. This list tracks convenience APIs that are still
+missing.
+
+### RESP2/Core command families
+
+- [ ] Generic key ops (`EXISTS`, `EXPIRE`, `TTL`, `PTTL`, `TYPE`, `RENAME`, `COPY`, `UNLINK`)
+- [ ] String ops beyond `SET`/`GET` (`SETEX`, `PSETEX`, `GETSET`, `STRLEN`, `APPEND`, `MSET`, `MSETNX`, `SETRANGE`, `GETRANGE`)
+- [ ] Hash/list/set/zset coverage expansion (`HDEL`, `HGETALL`, `HINCRBY`, `LPOP`, `RPOP`, `BLPOP`, `SREM`, `SISMEMBER`, `ZREM`, `ZCARD`, `ZRANK`, `ZREVRANGE`)
+- [ ] Streams coverage expansion (`XREAD`, `XREADGROUP`, `XGROUP`, `XACK`, `XDEL`, `XTRIM`)
+- [ ] Transactions and CAS helpers (`DISCARD`, `WATCH`/`UNWATCH` helper variants, `MULTI` builder parity)
+- [ ] Server/admin wrappers (`PING`, `INFO`, `DBSIZE`, `TIME`, `CONFIG`, `CLIENT`, `COMMAND`, `SLOWLOG`, `LATENCY`)
+- [ ] Pub/Sub helper parity (`PUBSUB CHANNELS/NUMSUB/NUMPAT/SHARD*`)
+
+### RESP3-focused features
+
+- [ ] HELLO convenience wrapper options (`SETNAME`, client metadata helpers)
+- [ ] Client-side caching wrappers (`CLIENT TRACKING`, `CLIENT CACHING`, redirect helpers)
+- [ ] ACL wrappers (`ACL CAT`, `ACL LIST`, `ACL GETUSER`, `ACL SETUSER`, etc.)
+- [ ] Function API wrappers (`FUNCTION LOAD`, `FUNCTION LIST`, `FCALL`, `FCALL_RO`)
+- [ ] Extended RESP3 push helper APIs (typed events for non Pub/Sub push kinds)
 
 ## Example and Benchmark
 

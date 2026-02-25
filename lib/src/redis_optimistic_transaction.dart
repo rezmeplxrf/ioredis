@@ -4,7 +4,7 @@ class RedisOptimisticTransaction {
   RedisOptimisticTransaction._(this._redis);
 
   final Redis _redis;
-  final List<List<String>> _commands = <List<String>>[];
+  final List<List<Object?>> _commands = <List<Object?>>[];
   bool _closed = false;
 
   static Future<RedisOptimisticTransaction> start({
@@ -47,15 +47,24 @@ class RedisOptimisticTransaction {
     return this;
   }
 
-  RedisOptimisticTransaction command(List<String> command) {
+  RedisOptimisticTransaction command(List<Object?> command) {
     _ensureOpen();
-    _commands.add(List<String>.from(command));
+    _commands.add(List<Object?>.from(command));
+    return this;
+  }
+
+  RedisOptimisticTransaction commandArgs(
+    String name, [
+    List<Object?> args = const <Object?>[],
+  ]) {
+    _ensureOpen();
+    _commands.add(<Object?>[name, ...args]);
     return this;
   }
 
   Future<List<dynamic>?> exec() async {
     _ensureOpen();
-    final commands = List<List<String>>.from(_commands);
+    final commands = List<List<Object?>>.from(_commands);
     _commands.clear();
     var multiStarted = false;
     var execSent = false;
@@ -63,7 +72,7 @@ class RedisOptimisticTransaction {
       await _redis.connection.sendCommand(<String>['MULTI']);
       multiStarted = true;
       for (final command in commands) {
-        await _redis.connection.sendCommand(command);
+        await _redis.connection.sendObjectCommand(command);
       }
       execSent = true;
       final result = await _redis.connection.sendCommand(<String>['EXEC']);

@@ -542,6 +542,20 @@ class Redis {
     }
   }
 
+  /// Send a generic redis command with optional arguments.
+  Future<dynamic> command(
+    String name, {
+    List<Object?> args = const <Object?>[],
+    Duration? timeout,
+    RedisRetryPolicy? retryPolicy,
+  }) {
+    return sendObjectCommand(
+      <Object?>[name, ...args],
+      timeout: timeout,
+      retryPolicy: retryPolicy,
+    );
+  }
+
   /// send command to connection
   Future<dynamic> sendCommand(
     List<String> commandList, {
@@ -585,6 +599,59 @@ class Redis {
         _emitEvent(RedisEvent(
           type: RedisEventType.commandRetry,
           command: commandList,
+          attempt: attempt,
+          error: mapped,
+        ));
+        await Future<void>.delayed(policy.nextDelay(attempt, _retryRandom));
+        attempt++;
+      }
+    }
+  }
+
+  /// Send redis command with mixed argument types (e.g. Uint8List payloads).
+  Future<dynamic> sendObjectCommand(
+    List<Object?> commandList, {
+    Duration? timeout,
+    RedisRetryPolicy? retryPolicy,
+  }) async {
+    if (commandList.every((part) => part is String)) {
+      return sendCommand(
+        commandList.cast<String>(),
+        timeout: timeout,
+        retryPolicy: retryPolicy,
+      );
+    }
+
+    final policy = retryPolicy ?? option.retryPolicy;
+    final commandForError = _commandSnapshot(commandList);
+    var attempt = 1;
+    final sw = Stopwatch()..start();
+
+    while (true) {
+      try {
+        final result =
+            await connection.sendObjectCommand(commandList, timeout: timeout);
+        _emitEvent(RedisEvent(
+          type: RedisEventType.commandSuccess,
+          command: commandForError,
+          duration: sw.elapsed,
+        ));
+        return result;
+      } catch (error) {
+        final mapped = RedisErrorMapper.map(error, command: commandForError);
+        if (policy == null ||
+            !policy.canRetry(mapped, attempt, commandForError)) {
+          _emitEvent(RedisEvent(
+            type: RedisEventType.commandError,
+            command: commandForError,
+            duration: sw.elapsed,
+            error: mapped,
+          ));
+          throw mapped;
+        }
+        _emitEvent(RedisEvent(
+          type: RedisEventType.commandRetry,
+          command: commandForError,
           attempt: attempt,
           error: mapped,
         ));
@@ -639,9 +706,90 @@ class Redis {
     }
   }
 
+  /// send pipeline returning raw bulk replies (Uint8List).
+  Future<List<dynamic>> sendBufferPipeline(
+    List<List<Object?>> commands, {
+    Duration? timeout,
+    int? batchSize,
+    RedisRetryPolicy? retryPolicy,
+  }) async {
+    if (commands.isEmpty) {
+      return <dynamic>[];
+    }
+    final policy = retryPolicy ?? option.retryPolicy;
+    final sw = Stopwatch()..start();
+    final commandForEvent = <String>['PIPELINE', commands.length.toString()];
+    var attempt = 1;
+    final effectiveBatchSize = batchSize ?? option.pipelineBatchSize;
+    if (effectiveBatchSize <= 0) {
+      throw ArgumentError.value(
+        effectiveBatchSize,
+        'batchSize',
+        'must be greater than 0',
+      );
+    }
+
+    while (true) {
+      try {
+        if (commands.length <= effectiveBatchSize) {
+          final result = await connection.sendPipeline(
+            commands,
+            timeout: timeout,
+            rawReply: true,
+          );
+          _emitEvent(RedisEvent(
+            type: RedisEventType.commandSuccess,
+            command: commandForEvent,
+            duration: sw.elapsed,
+          ));
+          return result;
+        }
+
+        final out = <dynamic>[];
+        for (var start = 0;
+            start < commands.length;
+            start += effectiveBatchSize) {
+          final end = min(start + effectiveBatchSize, commands.length);
+          final batch = commands.sublist(start, end);
+          out.addAll(await connection.sendPipeline(
+            batch,
+            timeout: timeout,
+            rawReply: true,
+          ));
+        }
+        _emitEvent(RedisEvent(
+          type: RedisEventType.commandSuccess,
+          command: commandForEvent,
+          duration: sw.elapsed,
+        ));
+        return out;
+      } catch (error) {
+        final mapped = RedisErrorMapper.map(error, command: commandForEvent);
+        if (policy == null ||
+            !policy.canRetry(mapped, attempt, commandForEvent)) {
+          _emitEvent(RedisEvent(
+            type: RedisEventType.commandError,
+            command: commandForEvent,
+            duration: sw.elapsed,
+            error: mapped,
+          ));
+          throw mapped;
+        }
+        _emitEvent(RedisEvent(
+          type: RedisEventType.commandRetry,
+          command: commandForEvent,
+          attempt: attempt,
+          error: mapped,
+        ));
+        await Future<void>.delayed(policy.nextDelay(attempt, _retryRandom));
+        attempt++;
+      }
+    }
+  }
+
   /// send pipeline on the main connection using a single batched write.
   Future<List<dynamic>> sendPipeline(
-    List<List<String>> commands, {
+    List<List<Object?>> commands, {
     Duration? timeout,
     int? batchSize,
     RedisRetryPolicy? retryPolicy,
@@ -714,7 +862,7 @@ class Redis {
   }
 
   /// Execute MULTI/EXEC commands on a reusable dedicated transaction connection.
-  Future<List<dynamic>> executeMulti(List<List<String>> commands) {
+  Future<List<dynamic>> executeMulti(List<List<Object?>> commands) {
     if (commands.isEmpty) {
       return Future<List<dynamic>>.value(<dynamic>[]);
     }
@@ -725,7 +873,7 @@ class Redis {
         await conn.sendCommand(<String>['MULTI']);
         multiStarted = true;
         for (final command in commands) {
-          await conn.sendCommand(command);
+          await conn.sendObjectCommand(command);
         }
         execSent = true;
         final result = await conn.sendCommand(<String>['EXEC']);

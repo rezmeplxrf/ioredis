@@ -203,8 +203,12 @@ class RedisConnection {
         // Do not consume unsolicited pushes as command responses.
         // RESP3 subscribe/unsubscribe acknowledgements can arrive as pushes and
         // must still complete the pending command future.
+        final hadPending = _pendingResponses.isNotEmpty;
         if (!_isUnsolicitedPacket(packet)) {
           _completeNextPending(packet);
+        }
+        if (!hadPending) {
+          _emitUnmatchedPacket(packet);
         }
       },
       onError: (Object error, StackTrace st) async {
@@ -377,10 +381,28 @@ class RedisConnection {
     }
   }
 
+  Future<dynamic> sendObjectCommand(
+    List<Object?> commandList, {
+    Duration? timeout,
+  }) async {
+    _inFlight++;
+    try {
+      final value = await _sendCommand(
+        commandList,
+        timeout: timeout,
+        commandForError: _commandSnapshot(commandList),
+      );
+      return value;
+    } finally {
+      _inFlight--;
+    }
+  }
+
   /// Sends pipelined commands in a single socket write.
   Future<List<dynamic>> sendPipeline(
-    List<List<String>> commands, {
+    List<List<Object?>> commands, {
     Duration? timeout,
+    bool rawReply = false,
   }) async {
     if (commands.isEmpty) {
       return <dynamic>[];
@@ -409,7 +431,11 @@ class RedisConnection {
       final output = BytesBuilder(copy: false);
       for (final command in commands) {
         output.add(_encoder.encode(command));
-        pending.add(_registerPending(command, timeout: timeout));
+        pending.add(_registerPending(
+          _commandSnapshot(command),
+          timeout: timeout,
+          rawReply: rawReply,
+        ));
       }
 
       try {
@@ -832,5 +858,13 @@ class RedisConnection {
     if (normalized is RedisPushData) {
       callback(normalized);
     }
+  }
+
+  void _emitUnmatchedPacket(dynamic packet) {
+    final callback = option.onUnmatchedPacket;
+    if (callback == null) {
+      return;
+    }
+    callback(_normalizeReply(packet, rawReply: false));
   }
 }

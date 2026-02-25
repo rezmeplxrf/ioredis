@@ -4,10 +4,16 @@ class RedisPipeline {
   RedisPipeline(this._redis);
 
   final Redis _redis;
-  final List<List<String>> _commands = <List<String>>[];
+  final List<List<Object?>> _commands = <List<Object?>>[];
 
-  RedisPipeline command(List<String> command) {
-    _commands.add(List<String>.from(command));
+  RedisPipeline command(List<Object?> command) {
+    _commands.add(List<Object?>.from(command));
+    return this;
+  }
+
+  RedisPipeline commandArgs(String name,
+      [List<Object?> args = const <Object?>[]]) {
+    _commands.add(<Object?>[name, ...args]);
     return this;
   }
 
@@ -31,11 +37,20 @@ class RedisPipeline {
     Duration? timeout,
     int? batchSize,
     RedisRetryPolicy? retryPolicy,
+    bool rawReply = false,
   }) async {
-    final commands = List<List<String>>.from(_commands);
+    final commands = List<List<Object?>>.from(_commands);
     _commands.clear();
     if (commands.isEmpty) {
       return <dynamic>[];
+    }
+    if (rawReply) {
+      return _redis.sendBufferPipeline(
+        commands,
+        timeout: timeout,
+        batchSize: batchSize,
+        retryPolicy: retryPolicy,
+      );
     }
     return _redis.sendPipeline(
       commands,

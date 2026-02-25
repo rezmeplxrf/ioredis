@@ -1077,6 +1077,13 @@ void main() {
       expect(value, equals(42));
     });
 
+    test('generic command API supports arbitrary commands', () async {
+      await redis.command('SET', args: <Object?>['generic:cmd:key', 'v1']);
+      final value =
+          await redis.command('GET', args: <Object?>['generic:cmd:key']);
+      expect(value, equals('v1'));
+    });
+
     test('setBuffer/getBuffer supports binary payloads', () async {
       final payload = Uint8List.fromList(<int>[
         0,
@@ -1125,6 +1132,70 @@ void main() {
       await redis.setBuffer('buffer_random_corpus', payload);
       final received = await redis.getBuffer('buffer_random_corpus');
       expect(received, equals(payload));
+    });
+
+    test('pipeline supports object commands and raw replies', () async {
+      final payload = Uint8List.fromList(<int>[0, 1, 255, 10, 13, 64]);
+      final replies = await redis.sendBufferPipeline(<List<Object?>>[
+        <Object?>['SET', 'pipeline:buffer:key', payload],
+        <Object?>['GET', 'pipeline:buffer:key'],
+      ]);
+      expect(replies, hasLength(2));
+      expect(replies[0], equals('OK'));
+      expect(replies[1], equals(payload));
+    });
+
+    test('multi supports object command arguments', () async {
+      final replies = await (redis.multi()
+            ..commandArgs('SET', <Object?>['multi:obj:key', 'obj-v'])
+            ..commandArgs('GET', <Object?>['multi:obj:key']))
+          .exec();
+      expect(replies, hasLength(2));
+      expect(replies[0], equals('OK'));
+      expect(replies[1], equals('obj-v'));
+    });
+
+    test('watch transaction supports object command arguments', () async {
+      final tx = await redis.watch(<String>['watch:obj:key']);
+      tx.commandArgs('SET', <Object?>['watch:obj:key', 'watch-v']);
+      tx.commandArgs('GET', <Object?>['watch:obj:key']);
+      final result = await tx.exec();
+      expect(result, isNotNull);
+      expect(result, hasLength(2));
+      expect(result![0], equals('OK'));
+      expect(result[1], equals('watch-v'));
+    });
+
+    test('unmatched packets are emitted for monitor style traffic', () async {
+      final unmatched = <dynamic>[];
+      final monitor = Redis(RedisOptions(
+        host: commonOptions.host,
+        port: commonOptions.port,
+        password: commonOptions.password,
+        db: commonOptions.db,
+        protocolVersion: 2,
+        onUnmatchedPacket: unmatched.add,
+      ));
+      final actor = monitor.duplicate();
+      addTearDown(() async {
+        await monitor.disconnect();
+        await actor.disconnect();
+      });
+
+      await monitor.sendCommand(<String>['MONITOR']);
+      await actor.set('monitor:emit:key', '1');
+
+      await expectLater(
+        () async {
+          final start = DateTime.now();
+          while (unmatched.isEmpty &&
+              DateTime.now().difference(start) < const Duration(seconds: 2)) {
+            await Future<void>.delayed(const Duration(milliseconds: 25));
+          }
+          expect(unmatched, isNotEmpty);
+        },
+        returnsNormally,
+      );
     });
 
     // JSON Tests (if RedisJSON module is available)

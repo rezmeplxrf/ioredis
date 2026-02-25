@@ -24,6 +24,7 @@ class RedisOptions {
     this.preserveResp3Attributes = false,
     this.onEvent,
     this.onPush,
+    this.onUnmatchedPacket,
     this.pipelineBatchSize = 256,
     this.maxPendingCommands = 10000,
     this.tlsContext,
@@ -70,6 +71,10 @@ class RedisOptions {
 
   /// Callback for RESP3 push messages, including invalidation pushes.
   void Function(RedisPushData push)? onPush;
+
+  /// Callback for server packets that arrive without a waiting command.
+  /// Useful for command modes like MONITOR that stream messages.
+  void Function(dynamic packet)? onUnmatchedPacket;
 
   /// key prefix
   /// ```
@@ -128,6 +133,7 @@ class RedisOptions {
       preserveResp3Attributes: preserveResp3Attributes,
       onEvent: onEvent,
       onPush: onPush,
+      onUnmatchedPacket: onUnmatchedPacket,
       pipelineBatchSize: pipelineBatchSize,
       maxPendingCommands: maxPendingCommands,
       tlsContext: tlsContext,
